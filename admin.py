@@ -57,7 +57,8 @@ with tab_track:
             timezone_str = tf.timezone_at(lng=lon_start, lat=lat_start) 
             time_start = gdf['time'].dt.tz_convert(timezone_str).iloc[0]
             time_end = gdf['time'].dt.tz_convert(timezone_str).iloc[-1]
-
+            gdf["lat"] = gdf.geometry.y
+            gdf["lon"] = gdf.geometry.x
 
 
             gdf.crs = "EPSG:4326"
@@ -109,26 +110,31 @@ with tab_track:
             ddf['track_title'] = [track_title]
             ddf['sport_id'] = [sport[0]]  # sport_id from selected sport in dropdown
             ddf['tour_id'] = [tour[0]]  # tour_id from selected tour in dropdown
+            
             ddf['location_start_country'] = [location_start.raw.get("address").get("country")]
             ddf['location_start_state'] = [location_start.raw.get("address").get("state")]
             ddf['location_start_county'] = [location_start.raw.get("address").get("county")]
             ddf['location_start_town'] = [location_start.raw.get("address").get("town")]
             ddf['location_start_suburb'] = [location_start.raw.get("address").get("suburb")]
             ddf['location_start_road'] = [location_start.raw.get("address").get("road")]
+            
             ddf['location_end_country'] = [location_end.raw.get("address").get("country")]
             ddf['location_end_state'] = [location_end.raw.get("address").get("state")]
             ddf['location_end_county'] = [location_end.raw.get("address").get("county")]
             ddf['location_end_town'] = [location_end.raw.get("address").get("town")]
             ddf['location_end_suburb'] = [location_end.raw.get("address").get("suburb")]
             ddf['location_end_road'] = [location_end.raw.get("address").get("road")]
+            
             ddf['location_start_lat_lon'] = [{"lat": lat_start, "lon": lon_start}]
-            ddf['location_lat_min']
-            ddf['location_lat_max']
-            ddf['location_lon_min']
-            ddf['location_lon_max']
             ddf['location_end_lat_lon'] = [{"lat": lat_end, "lon": lon_end}]
             ddf['location_start_address'] = [json.dumps(location_start.raw)]
             ddf['location_end_address']   = [json.dumps(location_end.raw)]
+
+            ddf['location_lat_min'] = gdf["lat"].min()
+            ddf['location_lat_max'] = gdf["lat"].max()
+            ddf['location_lon_min'] = gdf["lon"].min()
+            ddf['location_lon_max'] = gdf["lon"].max() 
+
             ddf['time_zone'] = [timezone_str]
             ddf['time_start'] = [time_start]
             ddf['time_end'] = [time_end]
@@ -136,10 +142,14 @@ with tab_track:
             ddf['track_distance_m'] = [gdf.iloc[-1]['distance']]
             ddf['track_ascent_m'] = [gdf['ascent'].sum()]
             ddf['track_descent_m'] = [gdf['descent'].sum()]
-            ddf["elevation_min"] 
-            ddf["elevation_max"] 
-            ddf["speed_min"]
-            ddf["speed_max"]
+
+            ddf["elevation_min"] = gdf["ele"].min()
+            ddf["elevation_max"] = gdf["ele"].max()
+            ddf["speed_min"] = gdf["km_per_h"].min()
+            ddf["speed_max"] = gdf["km_per_h"].max()
+            ddf["slope_min"] = gdf["slope"].min()
+            ddf["slope_max"] = gdf["slope"].max()
+            
             ddf['file_name'] =   [gpx_file.name]
             ddf['file_data'] = [gpx_file.getvalue()]
             ddf['time_stamp'] = [datetime.datetime.now().isoformat()]
@@ -167,12 +177,17 @@ with tab_track:
                 TRY_CAST(location_end_town      AS VARCHAR) AS location_end_town,
                 TRY_CAST(location_end_suburb    AS VARCHAR) AS location_end_suburb,
                 TRY_CAST(location_end_road      AS VARCHAR) AS location_end_road,
-
+                    
                 CAST(location_start_lat_lon AS STRUCT(lat DOUBLE, lon DOUBLE)) AS location_start_lat_lon,
                 CAST(location_end_lat_lon   AS STRUCT(lat DOUBLE, lon DOUBLE)) AS location_end_lat_lon,
                 CAST(location_start_address AS JSON) AS location_start_address,
                 CAST(location_end_address   AS JSON) AS location_end_address,
 
+                CAST(location_lat_min           AS DOUBLE) AS location_lat_min,
+                CAST(location_lat_max           AS DOUBLE) AS location_lat_max,
+                CAST(location_lon_min           AS DOUBLE) AS location_lon_min,
+                CAST(location_lon_max           AS DOUBLE) AS location_lon_max,
+                    
                 CAST(time_zone          AS VARCHAR)   AS time_zone,
                 TRY_CAST(time_start     AS TIMESTAMP) AS time_start,
                 TRY_CAST(time_end       AS TIMESTAMP) AS time_end,
@@ -180,7 +195,14 @@ with tab_track:
                 CAST(track_distance_m   AS DOUBLE)    AS track_distance_m,
                 CAST(track_ascent_m     AS DOUBLE)    AS track_ascent_m,
                 CAST(track_descent_m    AS DOUBLE)    AS track_descent_m,
-
+                
+                CAST(elevation_min    AS DOUBLE)    AS elevation_min,
+                CAST(elevation_max    AS DOUBLE)    AS elevation_max,
+                CAST(speed_min    AS DOUBLE)    AS speed_min,
+                CAST(speed_max    AS DOUBLE)    AS speed_max,
+                CAST(slope_min    AS DOUBLE)    AS slope_min,
+                CAST(slope_max    AS DOUBLE)    AS slope_max,
+                    
                 CAST(file_name          AS VARCHAR)   AS file_name,
                 CAST(file_data          AS BLOB)      AS file_data,
                 TRY_CAST(time_stamp     AS TIMESTAMP) AS time_stamp

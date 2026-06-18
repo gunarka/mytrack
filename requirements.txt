@@ -5,3 +5,6 @@ gpxpy
 geopy
 geopandas
 timezonefinder
+geopy
+streamlit_folium
+plotly
