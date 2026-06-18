@@ -1,0 +1,7 @@
+streamlit
+duckdb
+pandas
+gpxpy
+geopy
+geopandas
+timezonefinder
