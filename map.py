@@ -188,7 +188,7 @@ with st.sidebar:
         "none": "Nichts",
     }
     st.selectbox(
-        "Wähle eine Spalte zum Plotten",
+        "Einfärben mit",
         options=list(color_options.keys()),
         key="plot_column",
         format_func=lambda x: color_options[x],
@@ -497,10 +497,15 @@ folium.LayerControl().add_to(m)
 m.add_child(track_col)
 st_folium(m, width="stretch", height=800)
 
+fig.update_layout(
+    xaxis_fixedrange=True, 
+    yaxis_fixedrange=True,
+    margin=dict(l=0, r=0, t=0, b=0) 
+    )
 # on_select="rerun": ein Klick im Profil löst einen kompletten Skript-Rerun
 # aus; "event" enthält danach die Klick-Information (welche Trace, welcher
 # Punkt) für DIESEN Durchlauf.
-event = st.plotly_chart(fig, on_select="rerun", key="my_chart_key")
+event = st.plotly_chart(fig, on_select="rerun", key="my_chart_key", height=300)
 
 
 # --------------------------------------------------------------------------
