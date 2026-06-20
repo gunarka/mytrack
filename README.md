@@ -103,27 +103,3 @@ entsprechenden Ort.
 - Für den Datei-Upload werden ausschließlich `.gpx`-Dateien mit einem
   `<trk>`-Track akzeptiert (Format wie von gängigen GPS-Geräten/Apps
   exportiert).
-
-## Änderungen in diesem Refactoring
-
-Gegenüber der ursprünglichen Version wurden folgende Punkte überarbeitet:
-
-- Gemeinsame Logik (Datenbank, GPX-Verarbeitung, Geocoding, CRUD) wurde aus
-  `admin.py` und `map.py` herausgelöst und in `functions.py` gebündelt –
-  dadurch gibt es z. B. die GPX-Aufbereitung nur noch einmal statt
-  zweimal mit leicht unterschiedlichem Code.
-- `admin.py` unterstützt jetzt zusätzlich zum Anlegen auch das
-  **Bearbeiten und Löschen** bestehender Tracks, Touren und Sportarten
-  (vorher nur Anlegen möglich; die alte editierbare Tabellenansicht hat
-  Änderungen nicht gespeichert).
-- Neue `app.py` als zentraler Einstiegspunkt mit Titel, Seitenleiste und
-  Navigation zwischen Karte und Verwaltung.
-- Die Datenbankverbindung wird app-weit als Singleton (`st.cache_resource`)
-  verwaltet statt in `admin.py` bei jedem Durchlauf neu geöffnet und am
-  Ende geschlossen zu werden.
-- Sport-/Tour-Zuordnung eines Tracks ist jetzt optional.
-- Durchgängige Kommentierung des Codes auf Deutsch.
-- Kartenseite: Die bisherige flache Sport/Tour/Track-Filterung wurde durch
-  Pills für Sport/Jahr/Jahreszeit plus eine aufklappbare Jahr -> Monat ->
-  Tour -> Track-Auswahl ersetzt; eine Tour-Checkbox wählt dabei alle
-  Tracks dieser Tour auf einmal aus.
