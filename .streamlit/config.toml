@@ -1,0 +1,13 @@
+[client]
+toolbarMode = "minimal"
+[ui]
+hideTopBar = true
+
+then it can hide the toolbar by the toml file.
+
+.stVerticalBlock {
+gap: 0px !important;
+}
+.stMainBlockContainer {
+padding: 0px !important;
+}

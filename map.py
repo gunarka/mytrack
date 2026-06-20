@@ -84,7 +84,7 @@ def load_metadata() -> pd.DataFrame:
             gpx.speed_min, gpx.speed_max,
             gpx.elevation_min, gpx.elevation_max,
             gpx.slope_min, gpx.slope_max,
-            gpx.track_distance_m, gpx.track_time_s,
+            gpx.track_distance_m, gpx.track_time_s, gpx.track_time_moving_s,
             gpx.track_ascent_m, gpx.track_descent_m,
             gpx.sport_id, sport.sport_title,
             gpx.tour_id, tours.tour_title
@@ -350,6 +350,7 @@ def _render_kpis(df: pd.DataFrame) -> None:
     kpi_rows = [
         ("Länge", df["track_distance_m"].sum(), _format_distance_km, df["track_distance_m"]),
         ("Zeit", df["track_time_s"].sum(), _format_duration, df["track_time_s"]),
+        ("Zeit in Bewegung", df["track_time_moving_s"].sum(), _format_duration, df["track_time_moving_s"]),
         ("Aufstieg", df["track_ascent_m"].sum(), _format_meters, df["track_ascent_m"]),
         ("Abstieg", descent_abs.sum(), _format_meters, descent_abs),
         ("Min. Höhe", df["elevation_min"].min(), _format_meters, df["elevation_min"]),

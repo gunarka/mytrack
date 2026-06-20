@@ -8,7 +8,7 @@ als eine der Navigationsseiten eingebunden wird (siehe dort). Es kann zum
 Debuggen aber auch weiterhin direkt mit `streamlit run admin.py` gestartet
 werden (siehe Aufruf von render_admin_page() ganz am Ende der Datei).
 
-Die Seite besteht aus drei Tabs, die jeweils nach demselben Muster
+Die Seite besteht aus drei Tabs, die jeweils nach einem ähnlichen Muster
 aufgebaut sind:
     1. "Neu anlegen"   - Formular zum Erstellen eines neuen Eintrags
     2. "Bearbeiten"     - Formular zum Ändern (und Löschen) eines
@@ -17,7 +17,9 @@ aufgebaut sind:
 
 Tabs:
     - Tracks:     GPX-Datei hochladen & verarbeiten, Titel/Sport/Tour
-                  eines Tracks bearbeiten, alle Tracks anzeigen.
+                  eines Tracks bearbeiten, Track-Metadaten ('Zeit in
+                  Bewegung' sowie Auf-/Abstieg) anhand neuer Schwellwerte
+                  neu berechnen, alle Tracks anzeigen.
     - Touren:     Touren anlegen, umbenennen/löschen, alle Touren samt
                   ihrer Tracks anzeigen.
     - Sportarten: Sportarten anlegen, umbenennen/löschen, alle
@@ -31,6 +33,8 @@ ausschließlich UI-Code, der diese Funktionen aufruft.
 import streamlit as st
 
 from functions import (
+    DEFAULT_MIN_ELEVATION_CHANGE_M,
+    DEFAULT_MIN_SPEED_MOVING_KMH,
     delete_sport,
     delete_tour,
     delete_track,
@@ -43,6 +47,8 @@ from functions import (
     insert_tour,
     process_and_build_track,
     insert_track,
+    recalculate_all_tracks_metadata,
+    recalculate_track_metadata,
     sports_options,
     tours_options,
     update_sport,
@@ -141,6 +147,100 @@ def _render_track_edit_form() -> None:
             st.rerun()
 
 
+def _render_track_recalculate_form() -> None:
+    """
+    Formular: 'Zeit in Bewegung' sowie Auf-/Abstieg eines einzelnen oder
+    aller Tracks anhand neuer Schwellwerte aus den gespeicherten GPX-
+    Rohdaten neu berechnen (siehe recalculate_track_metadata /
+    recalculate_all_tracks_metadata in functions.py).
+
+    Sinnvoll, wenn sich die beim Hochladen verwendeten Standardwerte im
+    Nachhinein als ungeeignet herausstellen (z.B. weil ein sehr langsamer
+    Wander-Track viele kurze Stopps fälschlich als 'Bewegung' zählt, oder
+    ein Track mit schlechter GPS-Genauigkeit unrealistisch hohe Auf-/
+    Abstiegswerte zeigt). Distanz, Gesamtdauer und alle übrigen Kennzahlen
+    bleiben dabei unverändert, da sie nicht von diesen Schwellwerten
+    abhängen.
+    """
+    tracks_df = get_tracks()
+    with st.expander("🔄 Track-Metadaten neu berechnen", expanded=False):
+        if tracks_df.empty:
+            st.info("Noch keine Tracks vorhanden.")
+            return
+
+        st.caption(
+            "Berechnet 'Zeit in Bewegung' sowie Auf-/Abstieg aus den "
+            "gespeicherten GPX-Rohdaten neu - z.B. wenn die bisherigen "
+            "Schwellwerte zu unplausiblen Werten geführt haben. Distanz, "
+            "Gesamtdauer sowie alle übrigen Kennzahlen bleiben unverändert."
+        )
+
+        track_options = [(None, "– alle Tracks –")] + list(
+            zip(tracks_df["track_id"], tracks_df["track_title"])
+        )
+
+        with st.form(key="track_recalculate_form"):
+            target = st.selectbox(
+                "Track", track_options, format_func=lambda t: t[1]
+            )
+            min_speed = st.number_input(
+                "Minimale Geschwindigkeit für 'Zeit in Bewegung' (km/h)",
+                min_value=0.0,
+                value=DEFAULT_MIN_SPEED_MOVING_KMH,
+                step=0.1,
+                help=(
+                    "Punkte mit niedrigerer Geschwindigkeit gelten als "
+                    "Stillstand/Pause und zählen nicht zur Bewegungszeit."
+                ),
+            )
+            min_ele_change = st.number_input(
+                "Minimale Höhenänderung für Auf-/Abstieg (m)",
+                min_value=0.0,
+                value=DEFAULT_MIN_ELEVATION_CHANGE_M,
+                step=0.1,
+                help=(
+                    "Höhenschwankungen unterhalb dieses Werts gelten als "
+                    "Messrauschen und werden nicht als Auf- oder Abstieg "
+                    "gezählt (Schwellwert-Verfahren mit Hysterese)."
+                ),
+            )
+            use_accuracy = st.checkbox(
+                "Schwellwert mit gespeicherter GPS-Genauigkeit skalieren "
+                "(falls in der GPX-Datei vorhanden)",
+                value=True,
+                help=(
+                    "Enthält ein Track eine je Punkt gespeicherte GPS-"
+                    "Genauigkeit (vdop, ersatzweise hdop), wird der obige "
+                    "Schwellwert an ungenaueren Stellen automatisch "
+                    "vergrößert. Tracks ohne gespeicherte Genauigkeit "
+                    "nutzen weiterhin unverändert den festen Wert oben."
+                ),
+            )
+            submitted = st.form_submit_button("Neu berechnen")
+
+        if not submitted:
+            return
+
+        track_id = target[0]
+        with st.spinner("Berechne Track-Metadaten neu …"):
+            if track_id is None:
+                count = recalculate_all_tracks_metadata(
+                    min_speed_moving_kmh=min_speed,
+                    min_elevation_change_m=min_ele_change,
+                    use_gps_accuracy=use_accuracy,
+                )
+            else:
+                recalculate_track_metadata(
+                    track_id,
+                    min_speed_moving_kmh=min_speed,
+                    min_elevation_change_m=min_ele_change,
+                    use_gps_accuracy=use_accuracy,
+                )
+                count = 1
+        st.success(f"Metadaten für {count} Track(s) neu berechnet.")
+        st.rerun()
+
+
 def _render_track_overview() -> None:
     """Tabelle aller vorhandenen Tracks."""
     st.subheader("Alle Tracks")
@@ -156,6 +256,7 @@ def _render_track_overview() -> None:
         "time_end": "Ende",
         "track_distance_m": "Distanz (m)",
         "track_time_s": "Dauer (s)",
+        "track_time_moving_s": "Zeit in Bewegung (s)",
         "track_ascent_m": "Aufstieg (m)",
         "track_descent_m": "Abstieg (m)",
         "location_start_county": "Start-Gebiet",
@@ -172,6 +273,7 @@ def _render_track_overview() -> None:
 def _render_tracks_tab() -> None:
     _render_track_create_form()
     _render_track_edit_form()
+    _render_track_recalculate_form()
     _render_track_overview()
 
 

@@ -41,6 +41,15 @@ from timezonefinder import TimezoneFinder
 # (inkl. init.py) garantiert dieselbe Datenbank verwenden.
 DB_PATH = ".data/tracks.duckdb"
 
+# Standard-Schwellwerte für die Berechnung von "Zeit in Bewegung" sowie für
+# Auf-/Abstieg (siehe compute_moving_time_s / compute_ascent_descent weiter
+# unten). Diese Werte werden beim Hochladen eines neuen Tracks automatisch
+# verwendet (process_and_build_track). In der Verwaltung (admin.py) lassen
+# sich bereits gespeicherte Tracks mit abweichenden Werten neu berechnen,
+# ohne dass diese Standardwerte selbst verändert werden.
+DEFAULT_MIN_SPEED_MOVING_KMH = 1.0
+DEFAULT_MIN_ELEVATION_CHANGE_M = 2.0
+
 
 # ---------------------------------------------------------------------------
 # Datenbank
@@ -66,7 +75,37 @@ def get_connection() -> duckdb.DuckDBPyConnection:
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    return duckdb.connect(database=str(DB_PATH))
+    con = duckdb.connect(database=str(DB_PATH))
+    _ensure_schema_migrations(con)
+    return con
+
+
+def _ensure_schema_migrations(con: duckdb.DuckDBPyConnection) -> None:
+    """
+    Sanfte Schema-Migration für bereits bestehende, schon befüllte
+    Datenbanken: ergänzt nachträglich eingeführte Spalten der Tabelle
+    'gpx', falls sie noch fehlen (z.B. 'track_time_moving_s' für "Zeit in
+    Bewegung").
+
+    Wird bei JEDEM Verbindungsaufbau aufgerufen, ist also ein no-op, sobald
+    die Spalte einmal existiert. Dadurch müssen Bestandsnutzer ihre Daten
+    nicht über init_database() (= kompletter Datenverlust!) neu anlegen,
+    nur weil eine neue Kennzahl hinzugekommen ist. Existiert die Tabelle
+    'gpx' noch gar nicht (frischer Checkout vor dem ersten Lauf von
+    init.py), passiert ebenfalls nichts - init_database() legt sie dann
+    direkt inklusive aller aktuellen Spalten an.
+    """
+    table_exists = con.sql(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'gpx'"
+    ).fetchone()
+    if not table_exists:
+        return
+
+    existing_columns = {
+        row[1] for row in con.execute("PRAGMA table_info('gpx')").fetchall()
+    }
+    if "track_time_moving_s" not in existing_columns:
+        con.execute("ALTER TABLE gpx ADD COLUMN track_time_moving_s DOUBLE")
 
 
 def init_database() -> None:
@@ -120,6 +159,7 @@ def init_database() -> None:
             time_start                TIMESTAMP,
             time_end                  TIMESTAMP,
             track_time_s              DOUBLE,
+            track_time_moving_s       DOUBLE,
             track_distance_m          DOUBLE,
             track_ascent_m            DOUBLE,
             track_descent_m           DOUBLE,
@@ -244,18 +284,147 @@ def process_track(track_id: str, _gpx_bytes: bytes) -> pd.DataFrame:
     return pd.DataFrame(gdf.drop(columns="geometry"))
 
 
-def summarize_track(gdf: gpd.GeoDataFrame) -> dict:
+def _resolve_gps_accuracy_series(gdf: gpd.GeoDataFrame) -> pd.Series | None:
+    """
+    Liefert die in der GPX-Datei je Trackpunkt gespeicherte GPS-Genauigkeit
+    als Skalierungsfaktor für die Auf-/Abstieg-Schwelle (siehe
+    compute_ascent_descent), oder None, falls keine Genauigkeit gespeichert
+    wurde.
+
+    Bevorzugt 'vdop' (vertikale Streuung - fachlich passender für
+    Höhenwerte als die horizontale), fällt auf 'hdop' zurück, falls die
+    GPX-Datei kein vdop enthält. Beide Felder sind Teil des GPX-Standards
+    (gpd.read_file(..., layer="track_points") liefert die Spalten immer
+    mit), werden aber nicht von jedem Gerät/jeder App tatsächlich befüllt -
+    sind ALLE Werte einer Spalte NaN, gilt sie als "nicht gespeichert" und
+    die nächste Spalte wird versucht; sind beide leer, wird None
+    zurückgegeben (Aufrufer verwendet dann einen festen Schwellwert).
+
+    Werte < 1.0 (überdurchschnittlich präzise Einzel-Fixes) werden auf 1.0
+    begrenzt, damit der vom Nutzer eingegebene Schwellwert als UNTERGRENZE
+    erhalten bleibt und sich nur bei schlechterer Genauigkeit (dop > 1)
+    vergrößert. Einzelne fehlende Werte (NaN) innerhalb einer ansonsten
+    befüllten Spalte werden ebenso als 1.0 behandelt, vergrößern den
+    Schwellwert an dieser Stelle also nicht.
+    """
+    for col in ("vdop", "hdop"):
+        if col in gdf.columns and gdf[col].notna().any():
+            return gdf[col].astype(float).fillna(1.0).clip(lower=1.0)
+    return None
+
+
+def compute_ascent_descent(
+    gdf: gpd.GeoDataFrame,
+    min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
+    use_gps_accuracy: bool = True,
+) -> tuple[float, float]:
+    """
+    Berechnet Auf- und Abstieg über ein Schwellwert-Verfahren mit
+    Hysterese, statt einfach alle Punkt-zu-Punkt-Höhendifferenzen
+    aufzusummieren: Kleine Höhenschwankungen unterhalb von
+    'min_elevation_change_m' (GPS-/Barometer-Rauschen) werden NICHT
+    mitgezählt. Erst wenn sich die Höhe gegenüber dem letzten Bezugspunkt
+    um mindestens den Schwellwert verändert hat, wird die Differenz dem
+    Auf- bzw. Abstieg zugerechnet UND der Bezugspunkt auf die aktuelle Höhe
+    zurückgesetzt. Das ist deutlich robuster als die naive Summe aller
+    Einzeldifferenzen, die bei dicht aufgezeichneten GPS-Tracks durch
+    Messrauschen zu stark überhöhten Werten führt.
+
+    Ist 'use_gps_accuracy' gesetzt UND enthält der Track eine je Punkt
+    gespeicherte GPS-Genauigkeit (vdop, ersatzweise hdop - siehe
+    _resolve_gps_accuracy_series), wird der Schwellwert je Punkt mit
+    diesem Wert skaliert: bei schlechterer Genauigkeit (höherer dop-Wert)
+    wird automatisch ein größerer Schwellwert verwendet, bei einem
+    optimalen Fix (dop <= 1) bleibt der eingegebene Wert unverändert. Ist
+    keine Genauigkeit gespeichert (häufig der Fall, z.B. bei vielen Handy-
+    Apps), wird durchgehend der feste Schwellwert verwendet.
+
+    Gibt (ascent_m, descent_m) zurück - descent_m als NEGATIVER Wert,
+    passend zur bestehenden Konvention der Tabelle 'gpx'
+    (track_descent_m).
+    """
+    ele = gdf["ele"].to_numpy(dtype=float)
+    n = len(ele)
+    if n == 0 or np.isnan(ele[0]):
+        return 0.0, 0.0
+
+    accuracy = _resolve_gps_accuracy_series(gdf) if use_gps_accuracy else None
+    if accuracy is not None:
+        thresholds = (min_elevation_change_m * accuracy).to_numpy()
+    else:
+        thresholds = np.full(n, min_elevation_change_m)
+
+    # Sequentielles Verfahren (jeder Schritt hängt vom zuletzt gesetzten
+    # Bezugspunkt ab) - bei den hier üblichen Trackgrößen (einige tausend
+    # Punkte) ist eine einfache Python-Schleife performant genug und bleibt
+    # deutlich lesbarer als eine vektorisierte Variante.
+    ascent = 0.0
+    descent = 0.0
+    ref_ele = ele[0]
+    for i in range(1, n):
+        if np.isnan(ele[i]):
+            continue
+        diff = ele[i] - ref_ele
+        threshold = thresholds[i]
+        if diff >= threshold:
+            ascent += diff
+            ref_ele = ele[i]
+        elif diff <= -threshold:
+            descent += diff
+            ref_ele = ele[i]
+        # |diff| < threshold: als Rauschen ignoriert, ref_ele bleibt stehen
+        # und sammelt sich erst bei einer der nächsten Differenzen weiter an.
+
+    return ascent, descent
+
+
+def compute_moving_time_s(
+    gdf: gpd.GeoDataFrame,
+    min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
+) -> float:
+    """
+    Summiert die Zeit-Differenzen ('time_delta', siehe
+    process_gpx_dataframe) aller Punkte, deren Geschwindigkeit
+    ('km_per_h', bezogen auf den jeweiligen Vorgängerpunkt) mindestens
+    'min_speed_moving_kmh' beträgt - ergibt "Zeit in Bewegung" als
+    Gegenstück zur reinen Gesamtdauer 'track_time_s' (die auch
+    Pausen/Stillstand mit einschließt).
+
+    Punkte mit NaN-Geschwindigkeit (z.B. zwei Punkte mit identischem
+    Zeitstempel) zählen NICHT als Bewegung.
+    """
+    moving = gdf["km_per_h"] >= min_speed_moving_kmh
+    seconds = gdf.loc[moving, "time_delta"].dt.total_seconds()
+    return float(seconds.sum())
+
+
+def summarize_track(
+    gdf: gpd.GeoDataFrame,
+    min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
+    min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
+    use_gps_accuracy: bool = True,
+) -> dict:
     """
     Fasst ein verarbeitetes Track-DataFrame (siehe process_gpx_dataframe)
     zu den Kennzahlen zusammen, die in der Tabelle 'gpx' pro Track
-    gespeichert werden: Gesamtzeit/-strecke, Auf-/Abstieg, Min/Max von
-    Höhe/Tempo/Steigung sowie die Bounding-Box (für den Kartenausschnitt).
+    gespeichert werden: Gesamtzeit/-strecke, Zeit in Bewegung, Auf-/
+    Abstieg, Min/Max von Höhe/Tempo/Steigung sowie die Bounding-Box (für
+    den Kartenausschnitt).
+
+    'min_speed_moving_kmh', 'min_elevation_change_m' und
+    'use_gps_accuracy' steuern dabei NUR "Zeit in Bewegung" sowie Auf-/
+    Abstieg (siehe compute_moving_time_s / compute_ascent_descent) - alle
+    übrigen Kennzahlen hängen nicht von diesen Schwellwerten ab.
     """
+    ascent_m, descent_m = compute_ascent_descent(
+        gdf, min_elevation_change_m, use_gps_accuracy=use_gps_accuracy
+    )
     return {
         "track_time_s": gdf.iloc[-1]["time_passed"].total_seconds(),
+        "track_time_moving_s": compute_moving_time_s(gdf, min_speed_moving_kmh),
         "track_distance_m": float(gdf.iloc[-1]["distance"]),
-        "track_ascent_m": float(gdf["ascent"].sum()),
-        "track_descent_m": float(gdf["descent"].sum()),
+        "track_ascent_m": ascent_m,
+        "track_descent_m": descent_m,
         "elevation_min": float(gdf["ele"].min()),
         "elevation_max": float(gdf["ele"].max()),
         "speed_min": float(gdf["km_per_h"].min(skipna=True)),
@@ -327,12 +496,24 @@ def process_and_build_track(
     track_title: str,
     sport_id: str | None,
     tour_id: str | None,
+    min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
+    min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
+    use_gps_accuracy: bool = True,
 ) -> dict:
     """
     Komplette Verarbeitung einer neu hochgeladenen GPX-Datei für den
-    Import: GPX einlesen -> Kennzahlen berechnen -> Start-/Endort per
-    Reverse-Geocoding ermitteln -> Zeitzone bestimmen -> fertigen
+    Import: GPX einlesen -> Kennzahlen berechnen (inkl. "Zeit in Bewegung"
+    und Auf-/Abstieg per Schwellwert, siehe summarize_track) -> Start-/
+    Endort per Reverse-Geocoding ermitteln -> Zeitzone bestimmen -> fertigen
     Datensatz für insert_track() zusammenbauen.
+
+    'min_speed_moving_kmh', 'min_elevation_change_m' und
+    'use_gps_accuracy' werden direkt an summarize_track() durchgereicht;
+    ihre Standardwerte (siehe DEFAULT_MIN_SPEED_MOVING_KMH /
+    DEFAULT_MIN_ELEVATION_CHANGE_M oben) sorgen dafür, dass die Berechnung
+    bereits beim normalen Hochladen eines Tracks automatisch erfolgt - eine
+    spätere Neuberechnung mit abweichenden Werten ist über
+    recalculate_track_metadata() möglich (siehe dort, von admin.py genutzt).
 
     Wird ausschließlich vom Upload-Formular in admin.py aufgerufen; hält
     den UI-Code dort schlank, da die gesamte fachliche Verarbeitung hier
@@ -351,7 +532,12 @@ def process_and_build_track(
     start_address = reverse_geocode(lat_start, lon_start)
     end_address = reverse_geocode(lat_end, lon_end)
 
-    summary = summarize_track(gdf)
+    summary = summarize_track(
+        gdf,
+        min_speed_moving_kmh=min_speed_moving_kmh,
+        min_elevation_change_m=min_elevation_change_m,
+        use_gps_accuracy=use_gps_accuracy,
+    )
 
     return {
         "track_id": str(uuid.uuid4()),
@@ -387,6 +573,7 @@ def process_and_build_track(
         "time_start": time_start,
         "time_end": time_end,
         "track_time_s": summary["track_time_s"],
+        "track_time_moving_s": summary["track_time_moving_s"],
         "track_distance_m": summary["track_distance_m"],
         "track_ascent_m": summary["track_ascent_m"],
         "track_descent_m": summary["track_descent_m"],
@@ -402,6 +589,7 @@ def process_and_build_track(
         "file_data": file_bytes,
         "time_stamp": datetime.datetime.now().isoformat(),
     }
+
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +745,7 @@ def get_tracks() -> pd.DataFrame:
             gpx.sport_id, sport.sport_title,
             gpx.tour_id, tours.tour_title,
             gpx.time_start, gpx.time_end,
-            gpx.track_distance_m, gpx.track_time_s,
+            gpx.track_distance_m, gpx.track_time_s, gpx.track_time_moving_s,
             gpx.track_ascent_m, gpx.track_descent_m,
             gpx.location_start_county, gpx.location_end_county,
             gpx.file_name
@@ -620,6 +808,7 @@ def insert_track(data: dict) -> None:
             TRY_CAST(time_start AS TIMESTAMP) AS time_start,
             TRY_CAST(time_end   AS TIMESTAMP) AS time_end,
             CAST(track_time_s     AS DOUBLE)  AS track_time_s,
+            CAST(track_time_moving_s AS DOUBLE) AS track_time_moving_s,
             CAST(track_distance_m AS DOUBLE)  AS track_distance_m,
             CAST(track_ascent_m   AS DOUBLE)  AS track_ascent_m,
             CAST(track_descent_m  AS DOUBLE)  AS track_descent_m,
@@ -651,3 +840,74 @@ def delete_track(track_id: str) -> None:
     """Löscht einen Track (inkl. der gespeicherten GPX-Datei) unwiderruflich."""
     con = get_connection()
     con.execute("DELETE FROM gpx WHERE track_id = ?", [track_id])
+
+
+# ---------------------------------------------------------------------------
+# Neuberechnung von Track-Metadaten
+# ---------------------------------------------------------------------------
+# Wird vom entsprechenden Bereich in admin.py genutzt, um "Zeit in
+# Bewegung" sowie Auf-/Abstieg bereits gespeicherter Tracks anhand neu
+# eingegebener Schwellwerte neu zu berechnen - z.B. wenn sich die beim
+# Hochladen verwendeten Standardwerte (DEFAULT_MIN_SPEED_MOVING_KMH /
+# DEFAULT_MIN_ELEVATION_CHANGE_M) im Nachhinein als ungeeignet für einen
+# bestimmten Tracktyp (z.B. sehr langsames Wandern vs. schnelles Radfahren)
+# herausstellen. Alle übrigen Kennzahlen (Distanz, Gesamtdauer, Min/Max-
+# Werte, Start-/Endort, ...) bleiben unverändert, da sie nicht von diesen
+# Schwellwerten abhängen und daher nicht neu berechnet werden müssen.
+def recalculate_track_metadata(
+    track_id: str,
+    min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
+    min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
+    use_gps_accuracy: bool = True,
+) -> None:
+    """
+    Berechnet 'Zeit in Bewegung' sowie Auf-/Abstieg EINES bestehenden
+    Tracks aus der gespeicherten GPX-Rohdatei (Spalte 'file_data') neu und
+    schreibt die aktualisierten Werte zurück in die Tabelle 'gpx'.
+
+    Löst KeyError/ValueError aus, falls 'track_id' nicht existiert.
+    """
+    con = get_connection()
+    row = con.execute(
+        "SELECT file_data FROM gpx WHERE track_id = ?", [track_id]
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Track {track_id!r} wurde nicht gefunden.")
+
+    gdf = process_gpx_dataframe(row[0])
+    ascent_m, descent_m = compute_ascent_descent(
+        gdf, min_elevation_change_m, use_gps_accuracy=use_gps_accuracy
+    )
+    moving_s = compute_moving_time_s(gdf, min_speed_moving_kmh)
+
+    con.execute(
+        """
+        UPDATE gpx
+        SET track_ascent_m = ?, track_descent_m = ?, track_time_moving_s = ?
+        WHERE track_id = ?
+        """,
+        [ascent_m, descent_m, moving_s, track_id],
+    )
+
+
+def recalculate_all_tracks_metadata(
+    min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
+    min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
+    use_gps_accuracy: bool = True,
+) -> int:
+    """
+    Wie recalculate_track_metadata(), aber für ALLE vorhandenen Tracks auf
+    einmal (z.B. nach Anpassung der Standard-Schwellwerte für die gesamte
+    Sammlung). Gibt die Anzahl der neu berechneten Tracks zurück.
+    """
+    con = get_connection()
+    track_ids = con.sql("SELECT track_id FROM gpx").fetchdf()["track_id"]
+    for track_id in track_ids:
+        recalculate_track_metadata(
+            str(track_id),
+            min_speed_moving_kmh=min_speed_moving_kmh,
+            min_elevation_change_m=min_elevation_change_m,
+            use_gps_accuracy=use_gps_accuracy,
+        )
+    return len(track_ids)
+

@@ -37,8 +37,18 @@ drei Tabellen:
 - **`tours`** – Touren (`tour_id`, `tour_title`)
 - **`gpx`** – Tracks: Titel, Zuordnung zu Sport/Tour, Start-/Endadresse
   (per Reverse-Geocoding ermittelt), Zeitzone, Kennzahlen (Distanz, Dauer,
-  Auf-/Abstieg, Min/Max von Höhe/Tempo/Steigung) sowie die rohe GPX-Datei
-  als Blob.
+  Zeit in Bewegung, Auf-/Abstieg, Min/Max von Höhe/Tempo/Steigung) sowie
+  die rohe GPX-Datei als Blob.
+
+  "Zeit in Bewegung" sowie Auf-/Abstieg werden über Schwellwerte
+  berechnet: Punkte unterhalb einer minimalen Geschwindigkeit zählen
+  nicht als Bewegung, Höhenschwankungen unterhalb einer minimalen
+  Höhenänderung nicht als Auf-/Abstieg (filtert GPS-/Barometer-Rauschen).
+  Diese Schwellwerte werden beim Hochladen automatisch mit
+  Standardwerten angewendet und lassen sich in der Verwaltung
+  nachträglich für einzelne oder alle Tracks neu berechnen (siehe
+  unten) - optional skaliert mit der je Punkt gespeicherten
+  GPS-Genauigkeit (vdop/hdop), falls die GPX-Datei diese enthält.
 
 Die Zuordnung eines Tracks zu Sport bzw. Tour ist **optional**: Wird eine
 Sportart oder Tour gelöscht, bleiben die zugehörigen Tracks erhalten und
@@ -72,11 +82,20 @@ vielen Uploads hintereinander kann es deshalb etwas dauern.
 1. Zuerst optional Sportarten und/oder Touren anlegen (Tabs "Sportarten" /
    "Touren").
 2. Im Tab "Tracks" eine GPX-Datei hochladen, optional Titel/Sport/Tour
-   vergeben und speichern – Distanz, Dauer, Höhenprofil-Kennzahlen sowie
-   Start-/Endort werden automatisch berechnet.
+   vergeben und speichern – Distanz, Dauer, Zeit in Bewegung,
+   Höhenprofil-Kennzahlen sowie Start-/Endort werden automatisch
+   berechnet.
 3. Bestehende Tracks, Touren und Sportarten lassen sich im jeweiligen
    "Bearbeiten"-Bereich umbenennen bzw. löschen. Alle vorhandenen Einträge
    werden zusätzlich in einer Übersichtstabelle angezeigt.
+4. Im Bereich "Track-Metadaten neu berechnen" (Tab "Tracks") lassen sich
+   "Zeit in Bewegung" sowie Auf-/Abstieg eines einzelnen oder aller
+   Tracks anhand neu eingegebener Schwellwerte (minimale Geschwindigkeit
+   bzw. minimale Höhenänderung) aus den gespeicherten GPX-Rohdaten neu
+   berechnen - z.B. wenn die beim Hochladen verwendeten Standardwerte für
+   einen bestimmten Tracktyp nicht passen. Optional wird der
+   Höhenänderungs-Schwellwert dabei mit der je Punkt gespeicherten
+   GPS-Genauigkeit skaliert, sofern diese in der GPX-Datei vorhanden ist.
 
 **Karte** (Seite "Karte"):
 
