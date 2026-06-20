@@ -1,10 +1,21 @@
+# Web-UI
 streamlit
+streamlit_folium
+
+# Datenhaltung
 duckdb
 pandas
+
+# GPX-Verarbeitung & Geodaten
 gpxpy
-geopy
 geopandas
-timezonefinder
+pyogrio
+
+# Geocoding & Zeitzone
 geopy
-streamlit_folium
+timezonefinder
+
+# Karte & Diagramme
+folium
+branca
 plotly

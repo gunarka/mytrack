@@ -1,278 +1,332 @@
-import streamlit as st                  # frontend framework
-import duckdb as duckdb                 # db storage 
-import pandas as pd                     # dataframe manipulation
-import numpy as np                      # numerical operations
-import gpxpy as gpxpy                   # gpx parsing
-import gpxpy.gpx as gpxpy_gpx           # gpxpy submodule for gpx parsing
-from geopy.geocoders import Nominatim   # geocoding library for reverse geocoding
-import geopandas as gpd                 # geospatial data manipulation
-from timezonefinder import TimezoneFinder # timezone lookup based on lat/lon
-import datetime                   # for handling timestamps
-import json                 # for handling JSON data
-import uuid            # for generating UUIDs
+"""
+admin.py
+========
+Verwaltungsoberfläche der GPS-Tracking-App.
 
-DB_PATH      = ".data/tracks.duckdb"
-con = duckdb.connect(database=str(DB_PATH))
-tours = con.execute("SELECT tour_id, tour_title FROM tours").fetchall()
-sports = con.execute("SELECT sport_id, sport_title FROM sport").fetchall()
+Dieses Modul stellt die Funktion render_admin_page() bereit, die von app.py
+als eine der Navigationsseiten eingebunden wird (siehe dort). Es kann zum
+Debuggen aber auch weiterhin direkt mit `streamlit run admin.py` gestartet
+werden (siehe Aufruf von render_admin_page() ganz am Ende der Datei).
 
-tab_track, tab_tour, tab_sport = st.tabs(   ["Tracks", "Touren", "Sportarten"])
+Die Seite besteht aus drei Tabs, die jeweils nach demselben Muster
+aufgebaut sind:
+    1. "Neu anlegen"   - Formular zum Erstellen eines neuen Eintrags
+    2. "Bearbeiten"     - Formular zum Ändern (und Löschen) eines
+                          bestehenden Eintrags
+    3. "Übersicht"      - Tabelle aller vorhandenen Einträge
 
-with tab_track:
-    
-    
+Tabs:
+    - Tracks:     GPX-Datei hochladen & verarbeiten, Titel/Sport/Tour
+                  eines Tracks bearbeiten, alle Tracks anzeigen.
+    - Touren:     Touren anlegen, umbenennen/löschen, alle Touren samt
+                  ihrer Tracks anzeigen.
+    - Sportarten: Sportarten anlegen, umbenennen/löschen, alle
+                  Sportarten samt ihrer Tracks anzeigen.
 
-    with st.form(key="track_form", clear_on_submit=True):
-        gpx_file = st.file_uploader("Upload a GPX file", type=["gpx"])
-        track_title = st.text_input("Track Titel")
-        tour = st.selectbox("Tour", tours, format_func=lambda t: t[1])
-        sport = st.selectbox("Sport", sports, format_func=lambda s: s[1])
-        submitted = st.form_submit_button("Verarbeiten und Speichern")
+Die komplette fachliche Logik (GPX-Verarbeitung, Geocoding, Datenbank-
+Zugriffe) steckt in functions.py - hier in admin.py befindet sich
+ausschließlich UI-Code, der diese Funktionen aufruft.
+"""
 
-        if gpx_file is not None and submitted == True:    
-        
-            if track_title == "":
-                track_title = gpx_file.name
+import streamlit as st
 
-            st.success(f"Uploaded file: {gpx_file.name} ({track_title})")
-
-            gdf = gpd.read_file(gpx_file.getvalue(), layer='track_points')
-            ddf = pd.DataFrame()
-
-            lat_start = gdf.iloc[0]['geometry'].y
-            lon_start = gdf.iloc[0]['geometry'].x
-            
-            lat_end = gdf.iloc[-1]['geometry'].y
-            lon_end = gdf.iloc[-1]['geometry'].x
-        
-
-
-
-            geolocator = Nominatim(user_agent="my_app")
-            location_start = geolocator.reverse((lat_start, lon_start))
-            location_end = geolocator.reverse((lat_end, lon_end))
-
-            # Initialize the finder
-            tf = TimezoneFinder()
-            timezone_str = tf.timezone_at(lng=lon_start, lat=lat_start) 
-            time_start = gdf['time'].dt.tz_convert(timezone_str).iloc[0]
-            time_end = gdf['time'].dt.tz_convert(timezone_str).iloc[-1]
-            gdf["lat"] = gdf.geometry.y
-            gdf["lon"] = gdf.geometry.x
+from functions import (
+    delete_sport,
+    delete_tour,
+    delete_track,
+    get_sports,
+    get_sports_overview,
+    get_tours,
+    get_tours_overview,
+    get_tracks,
+    insert_sport,
+    insert_tour,
+    process_and_build_track,
+    insert_track,
+    sports_options,
+    tours_options,
+    update_sport,
+    update_tour,
+    update_track,
+)
 
 
-            gdf.crs = "EPSG:4326"
-            gdf = gdf.to_crs(gdf.estimate_utm_crs())
+# ---------------------------------------------------------------------------
+# Tab "Tracks"
+# ---------------------------------------------------------------------------
+def _render_track_create_form() -> None:
+    """Formular: neue GPX-Datei hochladen, verarbeiten und speichern."""
+    with st.expander("➕ Neuen Track hochladen", expanded=True):
+        with st.form(key="track_create_form", clear_on_submit=True):
+            gpx_file = st.file_uploader("GPX-Datei", type=["gpx"])
+            track_title = st.text_input("Track-Titel (optional, sonst Dateiname)")
+            sport = st.selectbox(
+                "Sport", sports_options(), format_func=lambda s: s[1]
+            )
+            tour = st.selectbox(
+                "Tour", tours_options(), format_func=lambda t: t[1]
+            )
+            submitted = st.form_submit_button("Verarbeiten und speichern")
 
-            shifted_gdf = gdf.shift(1)
-            gdf['time_delta'] = gdf['time'] - shifted_gdf['time']  
-            gdf['dist_delta'] = gdf.distance(shifted_gdf)
+        if not submitted:
+            return
+        if gpx_file is None:
+            st.warning("Bitte zuerst eine GPX-Datei auswählen.")
+            return
 
-            # speed in various formats
-            gdf['m_per_s'] = gdf['dist_delta'] / gdf.time_delta.dt.seconds 
-            gdf['km_per_h'] = gdf['m_per_s'] * 3.6
-            gdf['min_per_km'] = 60 / (gdf['km_per_h'])
-
-            gdf['distance'] = gdf['dist_delta'].cumsum()
-
-            gdf['time_passed'] = gdf['time_delta'].cumsum()
-
-
-            # ascent is elevation delta, but only positive values
-            gdf['ele_delta'] = gdf['ele'] - shifted_gdf['ele'] 
-            gdf['ascent'] = gdf['ele_delta']
-            gdf.loc[gdf.ascent < 0, ['ascent']] = 0
-
-
-
-            gdf['descent'] = gdf['ele_delta']
-            gdf.loc[gdf.descent > 0, ['descent']] = 0
-
-
-            # Slope in %
-            # (since ele_delta is not really comparable)
-            gdf['slope'] = 100 * gdf['ele_delta'] / gdf['dist_delta']
-
-            # Ele normalized: Startpoint as 0
-            gdf['ele_normalized'] = gdf['ele'] - gdf.loc[0]['ele']
-
-            # slope and min_per_km can be infinite if 0 km/h
-            # Replace inf with nan for better plotting
-            gdf.replace(np.inf, np.nan, inplace=True)
-            gdf.replace(-np.inf, np.nan, inplace=True)
-
-       
-
-            
-
-           
-            ddf['track_id'] = [str(uuid.uuid4())]  
-            ddf['track_title'] = [track_title]
-            ddf['sport_id'] = [sport[0]]  # sport_id from selected sport in dropdown
-            ddf['tour_id'] = [tour[0]]  # tour_id from selected tour in dropdown
-            
-            ddf['location_start_country'] = [location_start.raw.get("address").get("country")]
-            ddf['location_start_state'] = [location_start.raw.get("address").get("state")]
-            ddf['location_start_county'] = [location_start.raw.get("address").get("county")]
-            ddf['location_start_town'] = [location_start.raw.get("address").get("town")]
-            ddf['location_start_suburb'] = [location_start.raw.get("address").get("suburb")]
-            ddf['location_start_road'] = [location_start.raw.get("address").get("road")]
-            
-            ddf['location_end_country'] = [location_end.raw.get("address").get("country")]
-            ddf['location_end_state'] = [location_end.raw.get("address").get("state")]
-            ddf['location_end_county'] = [location_end.raw.get("address").get("county")]
-            ddf['location_end_town'] = [location_end.raw.get("address").get("town")]
-            ddf['location_end_suburb'] = [location_end.raw.get("address").get("suburb")]
-            ddf['location_end_road'] = [location_end.raw.get("address").get("road")]
-            
-            ddf['location_start_lat_lon'] = [{"lat": lat_start, "lon": lon_start}]
-            ddf['location_end_lat_lon'] = [{"lat": lat_end, "lon": lon_end}]
-            ddf['location_start_address'] = [json.dumps(location_start.raw)]
-            ddf['location_end_address']   = [json.dumps(location_end.raw)]
-
-            ddf['location_lat_min'] = gdf["lat"].min()
-            ddf['location_lat_max'] = gdf["lat"].max()
-            ddf['location_lon_min'] = gdf["lon"].min()
-            ddf['location_lon_max'] = gdf["lon"].max() 
-
-            ddf['time_zone'] = [timezone_str]
-            ddf['time_start'] = [time_start]
-            ddf['time_end'] = [time_end]
-            ddf['track_time_s'] = [gdf.iloc[-1]['time_passed'].total_seconds()]
-            ddf['track_distance_m'] = [gdf.iloc[-1]['distance']]
-            ddf['track_ascent_m'] = [gdf['ascent'].sum()]
-            ddf['track_descent_m'] = [gdf['descent'].sum()]
-
-            ddf["elevation_min"] = gdf["ele"].min()
-            ddf["elevation_max"] = gdf["ele"].max()
-            ddf["speed_min"] = gdf["km_per_h"].min()
-            ddf["speed_max"] = gdf["km_per_h"].max()
-            ddf["slope_min"] = gdf["slope"].min()
-            ddf["slope_max"] = gdf["slope"].max()
-            
-            ddf['file_name'] =   [gpx_file.name]
-            ddf['file_data'] = [gpx_file.getvalue()]
-            ddf['time_stamp'] = [datetime.datetime.now().isoformat()]
+        title = track_title or gpx_file.name
+        # Reverse-Geocoding + Zeitzonen-Ermittlung brauchen einen Moment -
+        # daher ein sichtbarer Spinner, statt dass die Seite scheinbar
+        # "einfriert".
+        with st.spinner(f"Verarbeite '{gpx_file.name}' …"):
+            record = process_and_build_track(
+                file_name=gpx_file.name,
+                file_bytes=gpx_file.getvalue(),
+                track_title=title,
+                sport_id=sport[0],
+                tour_id=tour[0],
+            )
+            insert_track(record)
+        st.success(f"Track '{title}' gespeichert.")
+        st.rerun()
 
 
-        
-            con.sql("""
-            INSERT INTO gpx
-            SELECT
-                CAST(track_id AS UUID)   AS track_id,
-                TRY_CAST(track_title AS VARCHAR)   AS track_title,
-                CAST(sport_id AS UUID)   AS sport_id,
-                TRY_CAST(tour_id AS UUID)   AS tour_id,
+def _render_track_edit_form() -> None:
+    """Formular: Titel/Sport/Tour eines bestehenden Tracks ändern oder löschen."""
+    tracks_df = get_tracks()
+    with st.expander("✏️ Track bearbeiten", expanded=False):
+        if tracks_df.empty:
+            st.info("Noch keine Tracks vorhanden.")
+            return
 
-                TRY_CAST(location_start_country AS VARCHAR) AS location_start_country,
-                TRY_CAST(location_start_state   AS VARCHAR) AS location_start_state,
-                TRY_CAST(location_start_county  AS VARCHAR) AS location_start_county,
-                TRY_CAST(location_start_town    AS VARCHAR) AS location_start_town,
-                TRY_CAST(location_start_suburb  AS VARCHAR) AS location_start_suburb,
-                TRY_CAST(location_start_road    AS VARCHAR) AS location_start_road,
+        options = list(zip(tracks_df["track_id"], tracks_df["track_title"]))
+        selected_id, _ = st.selectbox(
+            "Track auswählen",
+            options=options,
+            format_func=lambda o: o[1],
+            key="track_edit_select",
+        )
+        row = tracks_df[tracks_df["track_id"] == selected_id].iloc[0]
 
-                TRY_CAST(location_end_country   AS VARCHAR) AS location_end_country,
-                TRY_CAST(location_end_state     AS VARCHAR) AS location_end_state,
-                TRY_CAST(location_end_county    AS VARCHAR) AS location_end_county,
-                TRY_CAST(location_end_town      AS VARCHAR) AS location_end_town,
-                TRY_CAST(location_end_suburb    AS VARCHAR) AS location_end_suburb,
-                TRY_CAST(location_end_road      AS VARCHAR) AS location_end_road,
-                    
-                CAST(location_start_lat_lon AS STRUCT(lat DOUBLE, lon DOUBLE)) AS location_start_lat_lon,
-                CAST(location_end_lat_lon   AS STRUCT(lat DOUBLE, lon DOUBLE)) AS location_end_lat_lon,
-                CAST(location_start_address AS JSON) AS location_start_address,
-                CAST(location_end_address   AS JSON) AS location_end_address,
-
-                CAST(location_lat_min           AS DOUBLE) AS location_lat_min,
-                CAST(location_lat_max           AS DOUBLE) AS location_lat_max,
-                CAST(location_lon_min           AS DOUBLE) AS location_lon_min,
-                CAST(location_lon_max           AS DOUBLE) AS location_lon_max,
-                    
-                CAST(time_zone          AS VARCHAR)   AS time_zone,
-                TRY_CAST(time_start     AS TIMESTAMP) AS time_start,
-                TRY_CAST(time_end       AS TIMESTAMP) AS time_end,
-                CAST(track_time_s       AS DOUBLE)    AS track_time_s,
-                CAST(track_distance_m   AS DOUBLE)    AS track_distance_m,
-                CAST(track_ascent_m     AS DOUBLE)    AS track_ascent_m,
-                CAST(track_descent_m    AS DOUBLE)    AS track_descent_m,
-                
-                CAST(elevation_min    AS DOUBLE)    AS elevation_min,
-                CAST(elevation_max    AS DOUBLE)    AS elevation_max,
-                CAST(speed_min    AS DOUBLE)    AS speed_min,
-                CAST(speed_max    AS DOUBLE)    AS speed_max,
-                CAST(slope_min    AS DOUBLE)    AS slope_min,
-                CAST(slope_max    AS DOUBLE)    AS slope_max,
-                    
-                CAST(file_name          AS VARCHAR)   AS file_name,
-                CAST(file_data          AS BLOB)      AS file_data,
-                TRY_CAST(time_stamp     AS TIMESTAMP) AS time_stamp
-            FROM ddf
-            """)
-            
-
-            
-            st.success("GPX file processed and stored in the database!")
-
-        else:
-            st.warning("Please upload a GPX file and submit the form to process and store the track data.")
-with tab_tour:
-
-    with st.expander("Tour erstellen", expanded=True):
-        with st.form("tour_form", clear_on_submit=True):
-            tour_title = st.text_input("Tour Titel")
-            tour_submitted = st.form_submit_button("Speichern")
-
-        if tour_submitted and tour_title:
-            tour_id = str(uuid.uuid4())
-            con.execute("INSERT INTO tours VALUES (?, ?)", [tour_id, tour_title])
-            st.success(f"Erstellt: {tour_title}")
-            st.rerun()
-
-    with st.expander("Touren bearbeiten", expanded=True):
-
-        tours_df = con.sql("SELECT tours.tour_id, tours.tour_title, gpx.track_title , gpx.time_start , gpx.time_end , gpx.track_distance_m  FROM tours left join gpx ON tours.tour_id = gpx.tour_id").fetchdf()
-
-        st.data_editor(tours_df,
-            column_config={
-            "tour_id": None,
-            "tour_title": st.column_config.TextColumn("Tour Titel"),
-            "track_title": st.column_config.TextColumn("Track Titel", disabled=True),
-            "time_start": st.column_config.DatetimeColumn("Startdatum", format="YYYY-MM-DD", disabled=True),
-            "time_end": st.column_config.DatetimeColumn("Enddatum", format="YYYY-MM-DD", disabled=True),
-            "track_distance_m": st.column_config.NumberColumn("Distanz (m)", disabled=True)
-            },
-            hide_index=True
+        sport_opts = sports_options()
+        tour_opts = tours_options()
+        sport_index = next(
+            (i for i, s in enumerate(sport_opts) if s[0] == row["sport_id"]), 0
+        )
+        tour_index = next(
+            (i for i, t in enumerate(tour_opts) if t[0] == row["tour_id"]), 0
         )
 
-with tab_sport:
-    with st.expander("Sport erstellen", expanded=True):
-        with st.form("sport_form", clear_on_submit=True):
-            sport_title = st.text_input("Sport Titel")
-            sport_submitted = st.form_submit_button("Speichern")
+        with st.form(key="track_edit_form"):
+            new_title = st.text_input("Track-Titel", value=row["track_title"])
+            new_sport = st.selectbox(
+                "Sport", sport_opts, index=sport_index, format_func=lambda s: s[1]
+            )
+            new_tour = st.selectbox(
+                "Tour", tour_opts, index=tour_index, format_func=lambda t: t[1]
+            )
+            col_save, col_delete = st.columns(2)
+            save = col_save.form_submit_button("Speichern", use_container_width=True)
+            delete = col_delete.form_submit_button(
+                "Löschen", use_container_width=True
+            )
 
-        if sport_submitted and sport_title:
-            sport_id = str(uuid.uuid4())
-            con.execute("INSERT INTO sport VALUES (?, ?)", [sport_id, sport_title])
-            st.success(f"Erstellt: {sport_title}")
+        if save:
+            update_track(selected_id, new_title, new_sport[0], new_tour[0])
+            st.success("Track aktualisiert.")
+            st.rerun()
+        if delete:
+            delete_track(selected_id)
+            st.success("Track gelöscht.")
             st.rerun()
 
-    with st.expander("Sports bearbeiten", expanded=True):
 
-        sports_df = con.sql("SELECT tours.tour_id, tours.tour_title, gpx.track_title , sport.sport_title, gpx.time_start , gpx.time_end , gpx.track_distance_m  FROM tours left join gpx ON tours.tour_id = gpx.tour_id left join sport ON gpx.sport_id = sport.sport_id").fetchdf()
-    
-        st.data_editor(sports_df,
-            column_config={
-            "tour_id": None,
-            "tour_title": st.column_config.TextColumn("Tour Titel"),
-            "track_title": st.column_config.TextColumn("Track Titel", disabled=True),
-            "time_start": st.column_config.DatetimeColumn("Startdatum", format="YYYY-MM-DD", disabled=True),
-            "time_end": st.column_config.DatetimeColumn("Enddatum", format="YYYY-MM-DD", disabled=True),
-            "track_distance_m": st.column_config.NumberColumn("Distanz (m)", disabled=True)
-            },
-            hide_index=True
+def _render_track_overview() -> None:
+    """Tabelle aller vorhandenen Tracks."""
+    st.subheader("Alle Tracks")
+    tracks_df = get_tracks()
+    if tracks_df.empty:
+        st.info("Noch keine Tracks vorhanden.")
+        return
+    display_df = tracks_df.rename(columns={
+        "track_title": "Track",
+        "sport_title": "Sport",
+        "tour_title": "Tour",
+        "time_start": "Start",
+        "time_end": "Ende",
+        "track_distance_m": "Distanz (m)",
+        "track_time_s": "Dauer (s)",
+        "track_ascent_m": "Aufstieg (m)",
+        "track_descent_m": "Abstieg (m)",
+        "location_start_town": "Start-Ort",
+        "location_end_town": "End-Ort",
+        "file_name": "Datei",
+    })
+    st.dataframe(
+        display_df.drop(columns=["track_id", "sport_id", "tour_id"]),
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _render_tracks_tab() -> None:
+    _render_track_create_form()
+    _render_track_edit_form()
+    _render_track_overview()
+
+
+# ---------------------------------------------------------------------------
+# Tab "Touren"
+# ---------------------------------------------------------------------------
+def _render_tour_create_form() -> None:
+    """Formular: neue Tour anlegen."""
+    with st.expander("➕ Neue Tour anlegen", expanded=True):
+        with st.form(key="tour_create_form", clear_on_submit=True):
+            tour_title = st.text_input("Tour-Titel")
+            submitted = st.form_submit_button("Speichern")
+
+        if submitted:
+            if not tour_title:
+                st.warning("Bitte einen Tour-Titel eingeben.")
+                return
+            insert_tour(tour_title)
+            st.success(f"Tour '{tour_title}' angelegt.")
+            st.rerun()
+
+
+def _render_tour_edit_form() -> None:
+    """Formular: bestehende Tour umbenennen oder löschen."""
+    tours_df = get_tours()
+    with st.expander("✏️ Tour bearbeiten", expanded=False):
+        if tours_df.empty:
+            st.info("Noch keine Touren vorhanden.")
+            return
+
+        options = list(zip(tours_df["tour_id"], tours_df["tour_title"]))
+        selected_id, selected_title = st.selectbox(
+            "Tour auswählen", options=options, format_func=lambda o: o[1],
+            key="tour_edit_select",
         )
-        
 
-db_results = con.sql("SELECT track_id, track_title, time_start, time_end, track_distance_m FROM gpx").fetchdf()     
-st.data_editor(db_results)
-con.close()
+        with st.form(key="tour_edit_form"):
+            new_title = st.text_input("Tour-Titel", value=selected_title)
+            col_save, col_delete = st.columns(2)
+            save = col_save.form_submit_button("Speichern", use_container_width=True)
+            delete = col_delete.form_submit_button(
+                "Löschen", use_container_width=True
+            )
+
+        if save:
+            update_tour(selected_id, new_title)
+            st.success("Tour aktualisiert.")
+            st.rerun()
+        if delete:
+            delete_tour(selected_id)
+            st.success("Tour gelöscht. Zugeordnete Tracks bleiben erhalten.")
+            st.rerun()
+
+
+def _render_tour_overview() -> None:
+    """Tabelle aller Touren samt ihrer Tracks."""
+    st.subheader("Alle Touren")
+    overview_df = get_tours_overview()
+    if overview_df.empty:
+        st.info("Noch keine Touren vorhanden.")
+        return
+    st.dataframe(overview_df, hide_index=True, width="stretch")
+
+
+def _render_tours_tab() -> None:
+    _render_tour_create_form()
+    _render_tour_edit_form()
+    _render_tour_overview()
+
+
+# ---------------------------------------------------------------------------
+# Tab "Sportarten"
+# ---------------------------------------------------------------------------
+def _render_sport_create_form() -> None:
+    """Formular: neue Sportart anlegen."""
+    with st.expander("➕ Neue Sportart anlegen", expanded=True):
+        with st.form(key="sport_create_form", clear_on_submit=True):
+            sport_title = st.text_input("Sport-Titel")
+            submitted = st.form_submit_button("Speichern")
+
+        if submitted:
+            if not sport_title:
+                st.warning("Bitte einen Sport-Titel eingeben.")
+                return
+            insert_sport(sport_title)
+            st.success(f"Sportart '{sport_title}' angelegt.")
+            st.rerun()
+
+
+def _render_sport_edit_form() -> None:
+    """Formular: bestehende Sportart umbenennen oder löschen."""
+    sports_df = get_sports()
+    with st.expander("✏️ Sportart bearbeiten", expanded=False):
+        if sports_df.empty:
+            st.info("Noch keine Sportarten vorhanden.")
+            return
+
+        options = list(zip(sports_df["sport_id"], sports_df["sport_title"]))
+        selected_id, selected_title = st.selectbox(
+            "Sportart auswählen", options=options, format_func=lambda o: o[1],
+            key="sport_edit_select",
+        )
+
+        with st.form(key="sport_edit_form"):
+            new_title = st.text_input("Sport-Titel", value=selected_title)
+            col_save, col_delete = st.columns(2)
+            save = col_save.form_submit_button("Speichern", use_container_width=True)
+            delete = col_delete.form_submit_button(
+                "Löschen", use_container_width=True
+            )
+
+        if save:
+            update_sport(selected_id, new_title)
+            st.success("Sportart aktualisiert.")
+            st.rerun()
+        if delete:
+            delete_sport(selected_id)
+            st.success("Sportart gelöscht. Zugeordnete Tracks bleiben erhalten.")
+            st.rerun()
+
+
+def _render_sport_overview() -> None:
+    """Tabelle aller Sportarten samt ihrer Tracks."""
+    st.subheader("Alle Sportarten")
+    overview_df = get_sports_overview()
+    if overview_df.empty:
+        st.info("Noch keine Sportarten vorhanden.")
+        return
+    st.dataframe(overview_df, hide_index=True, width="stretch")
+
+
+def _render_sports_tab() -> None:
+    _render_sport_create_form()
+    _render_sport_edit_form()
+    _render_sport_overview()
+
+
+# ---------------------------------------------------------------------------
+# Öffentliche Einstiegsfunktion
+# ---------------------------------------------------------------------------
+def render_admin_page() -> None:
+    """Baut die komplette Verwaltungsseite mit ihren drei Tabs auf."""
+    tab_track, tab_tour, tab_sport = st.tabs(["Tracks", "Touren", "Sportarten"])
+
+    with tab_track:
+        _render_tracks_tab()
+    with tab_tour:
+        _render_tours_tab()
+    with tab_sport:
+        _render_sports_tab()
+
+
+# Direkter Start zu Debug-Zwecken: `streamlit run admin.py`. Im
+# Normalbetrieb wird render_admin_page() stattdessen von app.py über die
+# Navigation aufgerufen.
+if __name__ == "__main__":
+    st.set_page_config(page_title="Verwaltung", layout="wide")
+    render_admin_page()
