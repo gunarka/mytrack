@@ -80,15 +80,23 @@ vielen Uploads hintereinander kann es deshalb etwas dauern.
 
 **Karte** (Seite "Karte"):
 
-In der Seitenleiste zunächst optional über die Pills nach Sport, Jahr
-und/oder Jahreszeit filtern (kaskadierend: jede Stufe zeigt nur noch die
-zur vorherigen Auswahl passenden Optionen). Darunter die eigentliche
-Track-Auswahl als aufklappbare Liste nach Jahr, darin gruppiert nach Monat
-und Tour. Ein Klick auf die Checkbox einer Tour wählt alle ihre Tracks
-innerhalb dieser Jahr/Monat-Gruppe auf einmal aus; einzelne Tracks lassen
-sich daneben auch gezielt einzeln (ab-)wählen. Es muss mindestens ein
-Track ausgewählt sein. Zusätzlich kann oben eine Farb-Spalte für das
-Höhenprofil gewählt werden (Höhe, Geschwindigkeit, Gefälle oder einfarbig).
+In der Seitenleiste zunächst optional über die Pills nach Sport, Land,
+Jahr und/oder Jahreszeit filtern (kaskadierend: jede Stufe zeigt nur noch
+die zur vorherigen Auswahl passenden Optionen). Der Land-Filter basiert
+auf dem per Reverse-Geocoding ermittelten Start- und Endland eines Tracks;
+Tracks mit Grenzübertritt (Start- und Endland unterschiedlich) erscheinen
+unter beiden Ländern. Darunter die eigentliche Track-Auswahl als
+aufklappbare Liste nach Jahr, darin gruppiert nach Monat und Tour. Ein
+Klick auf die Checkbox einer Tour wählt alle ihre Tracks innerhalb dieser
+Jahr/Monat-Gruppe auf einmal aus; einzelne Tracks lassen sich daneben auch
+gezielt einzeln (ab-)wählen. Es muss mindestens ein Track ausgewählt sein.
+Zusätzlich kann oben eine Farb-Spalte für das Höhenprofil gewählt werden
+(Höhe, Geschwindigkeit, Gefälle oder einfarbig).
+
+Oberhalb der Karte zeigt ein Kennzahlen-Bereich Länge, Zeit, Auf-/Abstieg
+sowie Min-/Max-Höhe als Summe über alle aktuell ausgewählten Tracks an;
+aufklappbar darunter dieselben Kennzahlen je einzelnem Track.
+
 Ein Klick auf einen Punkt im Höhenprofil zentriert die Karte auf den
 entsprechenden Ort.
 

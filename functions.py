@@ -559,7 +559,7 @@ def get_tracks() -> pd.DataFrame:
             gpx.time_start, gpx.time_end,
             gpx.track_distance_m, gpx.track_time_s,
             gpx.track_ascent_m, gpx.track_descent_m,
-            gpx.location_start_town, gpx.location_end_town,
+            gpx.location_start_county, gpx.location_end_county,
             gpx.file_name
         FROM gpx
         LEFT JOIN sport ON gpx.sport_id = sport.sport_id

@@ -9,15 +9,23 @@ Debuggen aber auch weiterhin direkt mit `streamlit run map.py` gestartet
 werden (siehe Aufruf von render_map_page() ganz am Ende der Datei).
 
 Aufbau der Seite:
-1. Sidebar: Pills-Filter nach Sport / Jahr / Jahreszeit sowie eine
+1. Sidebar: Pills-Filter nach Sport / Land / Jahr / Jahreszeit sowie eine
    aufklappbare Baumauswahl (Jahr -> Monat -> Tour -> Track) zur Auswahl
    einzelner Tracks; eine Tour-Checkbox wählt dabei alle Tracks dieser
-   Tour (innerhalb ihres Jahr/Monat-Abschnitts) auf einmal aus. Dazu die
-   Auswahl der Farb-Spalte für das Höhenprofil (Höhe, Geschwindigkeit,
-   Gefälle oder einfarbig).
-2. Hauptbereich: Eine Folium-Karte mit allen ausgewählten Tracks (farblich
-   entlang der gewählten Spalte eingefärbt) und darunter ein gemeinsames
-   Höhenprofil (Plotly) über alle Tracks hinweg.
+   Tour (innerhalb ihres Jahr/Monat-Abschnitts) auf einmal aus. Der
+   Land-Filter berücksichtigt sowohl das Start- als auch das Endland
+   eines Tracks (per Reverse-Geocoding ermittelt), ein Track mit
+   Grenzübertritt erscheint also unter beiden Ländern. Dazu die Auswahl
+   der Farb-Spalte für das Höhenprofil (Höhe, Geschwindigkeit, Gefälle
+   oder einfarbig).
+2. Hauptbereich: zwei nebeneinanderliegende, umrandete Container (siehe
+   st.container(border=True)). Links die Kennzahlen (Länge, Zeit,
+   Auf-/Abstieg, Min/Max-Höhe) als Summe über alle aktuell ausgewählten
+   Tracks, je Kennzahl eine eigene Zeile mit den Einzelwerten je Track klein
+   daneben. Rechts daneben (deutlich breiter) eine Folium-Karte mit allen
+   ausgewählten Tracks (farblich entlang der gewählten Spalte eingefärbt)
+   und darunter ein gemeinsames Höhenprofil (Plotly) über alle Tracks
+   hinweg.
 3. Klick-Interaktion: Klickt man im Höhenprofil auf einen Punkt, wird dieser
    Punkt im Profil größer dargestellt UND als zusätzlicher Marker auf der
    Karte eingezeichnet, auf den die Karte zentriert wird.
@@ -53,9 +61,11 @@ con = get_connection()
 def load_metadata() -> pd.DataFrame:
     """
     Lädt nur die "leichten" Metadaten aller Tracks (Titel, Bounding-Box,
-    Min/Max-Werte für Tempo/Höhe/Gefälle, ...) - bewusst OHNE die teils
+    Min/Max-Werte für Tempo/Höhe/Gefälle, Kennzahlen wie Distanz/Dauer/
+    Auf-/Abstieg sowie Start-/End-Land, ...) - bewusst OHNE die teils
     großen GPX-Binärdaten (file_data). Diese Metadaten werden für die
-    Sidebar-Filter (Sport/Tour/Track-Auswahl) gebraucht.
+    Sidebar-Filter (Sport/Land/Tour/Track-Auswahl) sowie die Kennzahlen-
+    Anzeige gebraucht.
 
     ttl=60: nach 60 Sekunden wird neu aus der DB gelesen, falls z.B.
     zwischenzeitlich in der Verwaltung neue Tracks angelegt wurden.
@@ -70,9 +80,12 @@ def load_metadata() -> pd.DataFrame:
             gpx.track_id, gpx.track_title, gpx.time_start,
             gpx.location_lat_min, gpx.location_lat_max,
             gpx.location_lon_min, gpx.location_lon_max,
+            gpx.location_start_country, gpx.location_end_country,
             gpx.speed_min, gpx.speed_max,
             gpx.elevation_min, gpx.elevation_max,
             gpx.slope_min, gpx.slope_max,
+            gpx.track_distance_m, gpx.track_time_s,
+            gpx.track_ascent_m, gpx.track_descent_m,
             gpx.sport_id, sport.sport_title,
             gpx.tour_id, tours.tour_title
         FROM gpx
@@ -127,6 +140,25 @@ def _season_for_month(month: int) -> str:
     if month in (6, 7, 8):
         return "summer"
     return "autumn"
+
+
+def _track_countries(row: pd.Series) -> list[str]:
+    """
+    Liefert die Liste der Länder eines Tracks (Start- UND Endland, per
+    Reverse-Geocoding ermittelt), ohne Duplikate.
+
+    Meist sind Start- und Endland identisch (Rundweg / Hin- und Rückweg) -
+    in diesem Fall enthält die Liste nur einen Eintrag. Bei einem Track mit
+    Grenzübertritt (Start- != Endland) enthält sie beide, sodass der Track
+    im Land-Filter unter beiden auswählbar ist. Fehlt das Land (z.B. weil
+    beim Hochladen kein Internet für das Reverse-Geocoding verfügbar war),
+    wird der jeweilige Eintrag einfach ausgelassen.
+    """
+    countries = []
+    for country in (row["location_start_country"], row["location_end_country"]):
+        if pd.notna(country) and country not in countries:
+            countries.append(country)
+    return countries
 
 
 def _track_checkbox_key(track_id) -> str:
@@ -263,97 +295,94 @@ def _render_track_tree(meta: pd.DataFrame) -> list:
     ]
 
 
-def render_map_page() -> None:
-    """Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil)."""
+# --------------------------------------------------------------------------
+# Kennzahlen (KPIs): Länge, Zeit, Auf-/Abstieg, Min/Max-Höhe
+# --------------------------------------------------------------------------
+def _format_distance_km(meters: float) -> str:
+    """Formatiert eine Distanz in Metern als Kilometer-Text, z.B. '12.3 km'."""
+    if pd.isna(meters):
+        return "–"
+    return f"{meters / 1000:.1f} km"
 
-    # ----------------------------------------------------------------------
-    # Sidebar: Filter
-    # ----------------------------------------------------------------------
-    with st.sidebar:
-        color_options = {
-            "ele": "Höhe",
-            "km_per_h": "Geschwindigkeit",
-            "slope": "Gefälle",
-            "none": "Nichts",
-        }
-        st.selectbox(
-            "Einfärben mit",
-            options=list(color_options.keys()),
-            key="plot_column",
-            format_func=lambda x: color_options[x],
-        )
 
-        meta = load_metadata()
+def _format_duration(seconds: float) -> str:
+    """Formatiert eine Dauer in Sekunden als 'Hh MMmin'-Text, z.B. '3h 45min'."""
+    if pd.isna(seconds):
+        return "–"
+    total_minutes = int(round(seconds / 60))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h {minutes:02d}min"
 
-        if meta["track_id"].dropna().empty:
-            st.info("Noch keine Tracks vorhanden. Lege zuerst welche in der Verwaltung an.")
-            st.stop()
 
-        # Jahr/Monat/Jahreszeit aus dem Startzeitpunkt ableiten - Basis
-        # sowohl für die Pills-Filter als auch für die Baum-Gruppierung
-        # weiter unten. Tracks ganz ohne Zeitstempel (selten, z.B. GPX ohne
-        # <time>-Angaben) haben dadurch kein Jahr und tauchen im Baum nicht
-        # auf, bleiben aber über die anderen Seiten weiterhin sichtbar.
-        meta = meta.copy()
-        meta["year"] = meta["time_start"].dt.year
-        meta["month"] = meta["time_start"].dt.month
-        meta["season"] = meta["month"].apply(
-            lambda m: _season_for_month(int(m)) if pd.notna(m) else None
-        )
+def _format_meters(value: float) -> str:
+    """Formatiert einen Höhen-/Auf-/Abstiegswert in Metern, z.B. '1234 m'."""
+    if pd.isna(value):
+        return "–"
+    return f"{value:.0f} m"
 
-        # Drei kaskadierende Pills-Filter: Sport -> Jahr -> Jahreszeit. Jede
-        # Stufe filtert "meta" weiter ein, sodass z.B. die Jahr-Auswahl nur
-        # noch Jahre zeigt, die zum gewählten Sport passen.
-        sport_dict = meta.set_index("sport_id")["sport_title"].dropna().to_dict()
-        st.pills(
-            label="Sport",
-            options=sport_dict,
-            selection_mode="multi",
-            key="sport_select",
-            format_func=lambda x: sport_dict[x],
-        )
-        if st.session_state.sport_select:
-            meta = meta[meta["sport_id"].isin(st.session_state.sport_select)]
 
-        year_options = sorted(meta["year"].dropna().astype(int).unique().tolist(), reverse=True)
-        st.pills(
-            label="Jahr",
-            options=year_options,
-            selection_mode="multi",
-            key="year_select",
-        )
-        if st.session_state.year_select:
-            meta = meta[meta["year"].isin(st.session_state.year_select)]
+def _render_kpis(df: pd.DataFrame) -> None:
+    """
+    Zeigt Kennzahlen zu den aktuell ausgewählten Tracks an: pro Kennzahl
+    (Länge, Zeit, Auf-/Abstieg, Min/Max-Höhe) eine eigene, am linken Rand
+    verankerte Zeile - links eine kompakte Kennzahlen-Box mit der Summe
+    (bzw. bei Min/Max-Höhe dem Minimum/Maximum) über alle ausgewählten
+    Tracks, daneben klein die Werte je einzelnem Track. Die Zeilen sind
+    jeweils durch einen Trenner voneinander abgesetzt.
 
-        season_options = [s for s in _SEASON_LABELS if s in set(meta["season"].dropna())]
-        st.pills(
-            label="Jahreszeit",
-            options=season_options,
-            selection_mode="multi",
-            key="season_select",
-            format_func=lambda x: _SEASON_LABELS[x],
-        )
-        if st.session_state.season_select:
-            meta = meta[meta["season"].isin(st.session_state.season_select)]
+    Länge/Zeit/Auf-/Abstieg werden für die Box-Summe aufaddiert. Bei
+    Min/Max-Höhe wäre ein simples Aufsummieren fachlich sinnlos - hier wird
+    stattdessen das Minimum aller Track-Minima bzw. das Maximum aller
+    Track-Maxima gebildet, also die tiefste bzw. höchste Stelle über alle
+    ausgewählten Tracks hinweg.
 
+    Hinweis: 'track_descent_m' ist in der Datenbank als NEGATIVER Wert
+    abgelegt (siehe summarize_track() in functions.py). Für die Anzeige
+    hier wird der Betrag gebildet, damit "Abstieg" wie "Aufstieg" als
+    positive Meterzahl erscheint.
+    """
+    st.subheader("Kennzahlen")
+
+    descent_abs = df["track_descent_m"].abs()
+
+    # (Label, Summen-/Aggregatwert über alle Tracks, Formatierfunktion,
+    # Werte je einzelnem Track in derselben Reihenfolge wie df)
+    kpi_rows = [
+        ("Länge", df["track_distance_m"].sum(), _format_distance_km, df["track_distance_m"]),
+        ("Zeit", df["track_time_s"].sum(), _format_duration, df["track_time_s"]),
+        ("Aufstieg", df["track_ascent_m"].sum(), _format_meters, df["track_ascent_m"]),
+        ("Abstieg", descent_abs.sum(), _format_meters, descent_abs),
+        ("Min. Höhe", df["elevation_min"].min(), _format_meters, df["elevation_min"]),
+        ("Max. Höhe", df["elevation_max"].max(), _format_meters, df["elevation_max"]),
+    ]
+
+    # [1, 4]: schmale Box links (am Rand verankert), breiterer Bereich
+    # daneben für die kleingedruckten Einzelwerte je Track.
+    for label, total_value, formatter, per_track_values in kpi_rows:
         st.divider()
-        st.caption("Tracks auswählen")
-        if meta.empty:
-            st.info("Keine Tracks für diese Filter.")
-            selected_tracks = []
-        else:
-            selected_tracks = _render_track_tree(meta)
+        col_box, col_tracks = st.columns([1, 1])
+        with col_box:
+            st.metric(label, formatter(total_value))
+        with col_tracks:
+            for title, value in zip(df["track_title"], per_track_values):
+                st.caption(f"{title}: {formatter(value)}")    
+            #track_text = "  ·  ".join(
+            #    f"{title}: {formatter(value)}"
+            #    for title, value in zip(df["track_title"], per_track_values)
+            #)
+            #st.caption(track_text)
+        
 
-        if not selected_tracks:
-            st.error("wähle einen Track")
-            st.stop()
-        meta = meta[meta["track_id"].isin(selected_tracks)]
 
-    # Erst JETZT, nachdem feststeht welche Tracks tatsächlich gebraucht
-    # werden, die zugehörigen (potenziell großen) GPX-Binärdaten nachladen.
-    file_data = load_track_files(tuple(sorted(meta["track_id"].tolist())))
-    df = meta.merge(file_data, on="track_id", how="inner")
+def _render_map_and_profile(df: pd.DataFrame) -> None:
+    """
+    Baut die Folium-Karte und das Plotly-Höhenprofil für die aktuell
+    ausgewählten Tracks auf und rendert beide übereinander.
 
+    Wird aus render_map_page() heraus innerhalb der rechten Spalte
+    aufgerufen (Kennzahlen links, Karte + Höhenprofil rechts daneben -
+    siehe dortige Spaltenaufteilung).
+    """
     # ----------------------------------------------------------------------
     # Wertebereiche für Kartenausschnitt und Farbskala
     # ----------------------------------------------------------------------
@@ -662,6 +691,128 @@ def render_map_page() -> None:
             if new_selection != st.session_state.selected_point:
                 st.session_state.selected_point = new_selection
                 st.rerun()
+
+
+def render_map_page() -> None:
+    """Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil)."""
+
+    # ----------------------------------------------------------------------
+    # Sidebar: Filter
+    # ----------------------------------------------------------------------
+    with st.sidebar:
+        color_options = {
+            "ele": "Höhe",
+            "km_per_h": "Geschwindigkeit",
+            "slope": "Gefälle",
+            "none": "Nichts",
+        }
+        st.selectbox(
+            "Einfärben mit",
+            options=list(color_options.keys()),
+            key="plot_column",
+            format_func=lambda x: color_options[x],
+        )
+
+        meta = load_metadata()
+
+        if meta["track_id"].dropna().empty:
+            st.info("Noch keine Tracks vorhanden. Lege zuerst welche in der Verwaltung an.")
+            st.stop()
+
+        # Jahr/Monat/Jahreszeit aus dem Startzeitpunkt ableiten - Basis
+        # sowohl für die Pills-Filter als auch für die Baum-Gruppierung
+        # weiter unten. Tracks ganz ohne Zeitstempel (selten, z.B. GPX ohne
+        # <time>-Angaben) haben dadurch kein Jahr und tauchen im Baum nicht
+        # auf, bleiben aber über die anderen Seiten weiterhin sichtbar.
+        meta = meta.copy()
+        meta["year"] = meta["time_start"].dt.year
+        meta["month"] = meta["time_start"].dt.month
+        meta["season"] = meta["month"].apply(
+            lambda m: _season_for_month(int(m)) if pd.notna(m) else None
+        )
+        # Liste der Länder (Start + Ende) je Track - Basis für den
+        # Land-Filter direkt unten.
+        meta["countries"] = meta.apply(_track_countries, axis=1)
+
+        # Vier kaskadierende Pills-Filter: Sport -> Land -> Jahr ->
+        # Jahreszeit. Jede Stufe filtert "meta" weiter ein, sodass z.B. die
+        # Jahr-Auswahl nur noch Jahre zeigt, die zum gewählten Sport/Land
+        # passen.
+        sport_dict = meta.set_index("sport_id")["sport_title"].dropna().to_dict()
+        st.pills(
+            label="Sport",
+            options=sport_dict,
+            selection_mode="multi",
+            key="sport_select",
+            format_func=lambda x: sport_dict[x],
+        )
+        if st.session_state.sport_select:
+            meta = meta[meta["sport_id"].isin(st.session_state.sport_select)]
+
+        country_options = sorted({c for countries in meta["countries"] for c in countries})
+        st.pills(
+            label="Land",
+            options=country_options,
+            selection_mode="multi",
+            key="country_select",
+        )
+        if st.session_state.country_select:
+            selected_countries = set(st.session_state.country_select)
+            meta = meta[
+                meta["countries"].apply(lambda cs: bool(selected_countries.intersection(cs)))
+            ]
+
+        year_options = sorted(meta["year"].dropna().astype(int).unique().tolist(), reverse=True)
+        st.pills(
+            label="Jahr",
+            options=year_options,
+            selection_mode="multi",
+            key="year_select",
+        )
+        if st.session_state.year_select:
+            meta = meta[meta["year"].isin(st.session_state.year_select)]
+
+        season_options = [s for s in _SEASON_LABELS if s in set(meta["season"].dropna())]
+        st.pills(
+            label="Jahreszeit",
+            options=season_options,
+            selection_mode="multi",
+            key="season_select",
+            format_func=lambda x: _SEASON_LABELS[x],
+        )
+        if st.session_state.season_select:
+            meta = meta[meta["season"].isin(st.session_state.season_select)]
+
+        st.divider()
+        st.caption("Tracks auswählen")
+        if meta.empty:
+            st.info("Keine Tracks für diese Filter.")
+            selected_tracks = []
+        else:
+            selected_tracks = _render_track_tree(meta)
+
+        if not selected_tracks:
+            st.error("wähle einen Track")
+            st.stop()
+        meta = meta[meta["track_id"].isin(selected_tracks)]
+
+    # Erst JETZT, nachdem feststeht welche Tracks tatsächlich gebraucht
+    # werden, die zugehörigen (potenziell großen) GPX-Binärdaten nachladen.
+    file_data = load_track_files(tuple(sorted(meta["track_id"].tolist())))
+    df = meta.merge(file_data, on="track_id", how="inner")
+
+    # ----------------------------------------------------------------------
+    # Hauptbereich: Kennzahlen links, Karte + Höhenprofil rechts daneben
+    # ----------------------------------------------------------------------
+    col_kpis, col_map = st.columns([1, 6], gap="small")
+
+    with col_kpis:
+        with st.container(border=True):
+            _render_kpis(df)
+
+    with col_map:
+        with st.container(border=True):
+            _render_map_and_profile(df)
 
 
 # Direkter Start zu Debug-Zwecken: `streamlit run map.py`. Im Normalbetrieb
