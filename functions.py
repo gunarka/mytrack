@@ -1,7 +1,7 @@
 """
 functions.py
 ============
-Gemeinsam genutzte Hilfsfunktionen der GPS-Tracking-App.
+Gemeinsam genutzte Hilfsfunktionen der MyTrack-App.
 
 Dieses Modul bündelt alles, was von mehreren Seiten/Skripten gebraucht
 wird (app.py, admin.py, map.py, init.py):

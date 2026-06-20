@@ -1,7 +1,7 @@
 """
 admin.py
 ========
-Verwaltungsoberfläche der GPS-Tracking-App.
+Verwaltungsoberfläche der MyTrack-App.
 
 Dieses Modul stellt die Funktion render_admin_page() bereit, die von app.py
 als eine der Navigationsseiten eingebunden wird (siehe dort). Es kann zum
@@ -158,8 +158,8 @@ def _render_track_overview() -> None:
         "track_time_s": "Dauer (s)",
         "track_ascent_m": "Aufstieg (m)",
         "track_descent_m": "Abstieg (m)",
-        "location_start_town": "Start-Ort",
-        "location_end_town": "End-Ort",
+        "location_start_county": "Start-Gebiet",
+        "location_end_county": "End-Gebiet",
         "file_name": "Datei",
     })
     st.dataframe(

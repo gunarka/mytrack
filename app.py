@@ -1,7 +1,7 @@
 """
 app.py
 ======
-Haupteinstiegspunkt der GPS-Tracking-App.
+Haupteinstiegspunkt der MyTrack-App.
 
 Dies ist die einzige Datei, mit der die App regulär gestartet wird:
 
@@ -29,7 +29,7 @@ from map import render_map_page
 
 # Muss als allererster Streamlit-Befehl der gesamten App stehen.
 st.set_page_config(
-    page_title="GPS Tracking",
+    page_title="MyTrack",
     page_icon="🗺️",
     layout="wide",
 )
@@ -37,8 +37,8 @@ st.set_page_config(
 # Titel + kurze Erklärung oben in der Seitenleiste - wird unabhängig von der
 # gewählten Seite (Karte/Verwaltung) immer angezeigt.
 with st.sidebar:
-    st.title("🗺️ GPS Tracking")
-    st.caption("Aufgezeichnete Touren ansehen und verwalten")
+    st.title("🗺️ MyTrack")
+    #st.caption("Aufgezeichnete Touren ansehen und verwalten")
     st.divider()
 
 # st.navigation erzeugt automatisch ein Auswahlmenü in der Seitenleiste und
