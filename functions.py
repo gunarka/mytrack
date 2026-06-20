@@ -45,7 +45,7 @@ DB_PATH = ".data/tracks.duckdb"
 # ---------------------------------------------------------------------------
 # Datenbank
 # ---------------------------------------------------------------------------
-@st.cache_resource(show_spinner=False)
+#@st.cache_resource(show_spinner=False)
 def get_connection() -> duckdb.DuckDBPyConnection:
     """
     Liefert die (einzige) DuckDB-Verbindung dieses Streamlit-Prozesses.
@@ -226,7 +226,7 @@ def process_gpx_dataframe(gpx_bytes: bytes) -> gpd.GeoDataFrame:
     return gdf
 
 
-@st.cache_data(show_spinner="GPX-Daten werden verarbeitet …")
+#@st.cache_data(show_spinner="GPX-Daten werden verarbeitet …")
 def process_track(track_id: str, _gpx_bytes: bytes) -> pd.DataFrame:
     """
     Gecachte Hülle um process_gpx_dataframe() für die Kartenansicht:
@@ -272,7 +272,7 @@ def summarize_track(gdf: gpd.GeoDataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # Geocoding & Zeitzone
 # ---------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
+#@st.cache_data(show_spinner=False)
 def reverse_geocode(lat: float, lon: float) -> dict:
     """
     Reverse-Geocoding eines Punktes über OpenStreetMap/Nominatim.
@@ -297,7 +297,7 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     }
 
 
-@st.cache_data(show_spinner=False)
+#@st.cache_data(show_spinner=False)
 def get_timezone(lat: float, lon: float) -> str | None:
     """Ermittelt die IANA-Zeitzone (z.B. 'Europe/Berlin') für einen Punkt."""
     tf = TimezoneFinder()
