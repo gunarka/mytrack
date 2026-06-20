@@ -49,7 +49,7 @@ con = get_connection()
 # --------------------------------------------------------------------------
 # Datenzugriff (gecacht)
 # --------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=60)
+#@st.cache_data(show_spinner=False, ttl=60)
 def load_metadata() -> pd.DataFrame:
     """
     Lädt nur die "leichten" Metadaten aller Tracks (Titel, Bounding-Box,
@@ -82,7 +82,7 @@ def load_metadata() -> pd.DataFrame:
         """).fetchdf()
 
 
-@st.cache_data(show_spinner=False, ttl=60)
+#@st.cache_data(show_spinner=False, ttl=60)
 def load_track_files(track_ids: tuple) -> pd.DataFrame:
     """
     Lädt die GPX-Binärdaten NUR für die übergebenen track_ids.
