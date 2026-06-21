@@ -12,7 +12,7 @@ Aufbau der Seite:
 1. Sidebar: Pills-Filter nach Sport / Land / Jahr / Jahreszeit sowie eine
    aufklappbare Baumauswahl (Jahr -> Monat -> Tour -> Track) zur Auswahl
    einzelner Tracks; eine Tour-Checkbox wählt dabei alle Tracks dieser
-   Tour (innerhalb ihres Jahr/Monat-Abschnitts) auf einmal aus. Der
+   Tour (innerhalb ihres Jahr/Monat-Teils) auf einmal aus. Der
    Land-Filter berücksichtigt sowohl das Start- als auch das Endland
    eines Tracks (per Reverse-Geocoding ermittelt), ein Track mit
    Grenzübertritt erscheint also unter beiden Ländern. Dazu die Auswahl
@@ -31,7 +31,7 @@ Aufbau der Seite:
    Karte eingezeichnet, auf den die Karte zentriert wird.
 4. Planungsmodus (Tourenplanung): Über den Button "📐 Planung" in der
    Seitenleiste - nur aktivierbar, wenn genau EIN Track ausgewählt ist -
-   lässt sich dieser Track in Abschnitte unterteilen. Die
+   lässt sich dieser Track in Teile unterteilen. Die
    Unterteilungspunkte werden per Mausklick gesetzt - entweder wie der
    normale Klick aus Punkt 3 im Höhenprofil, oder direkt auf der Karte
    (dort wird der nächstgelegene Trackpunkt zum Klick ermittelt, siehe
@@ -39,10 +39,10 @@ Aufbau der Seite:
    Punkt entfernt ihn wieder (siehe _toggle_split_point /
    _render_map_and_profile). Alternativ lässt sich jeder Punkt über ein
    "✕" in der Kennzahlen-Box löschen (siehe _render_planning_kpis). Die
-   Kennzahlen-Box zeigt in diesem Modus die Werte je Abschnitt statt je
-   Track (Wiederverwendung von _render_kpis mit einem pro Abschnitt
+   Kennzahlen-Box zeigt in diesem Modus die Werte je Teil statt je
+   Track (Wiederverwendung von _render_kpis mit einem pro Teil
    gebauten DataFrame, siehe _summarize_segment). Ein Export-Button
-   darunter erzeugt eine ZIP-Datei mit je einer GPX-Datei pro Abschnitt
+   darunter erzeugt eine ZIP-Datei mit je einer GPX-Datei pro Teil
    sowie einer weiteren GPX-Datei mit den gesetzten Punkten als Wegpunkte
    (siehe _build_planning_export_zip).
 
@@ -58,7 +58,7 @@ import zipfile  # ZIP-Export im Planungsmodus
 
 import folium  # Erzeugt die interaktive Leaflet-Karte
 import branca.colormap as cm  # Farbskala für die Karten-Einfärbung
-import gpxpy  # GPX-Export der Abschnitte/Punkte im Planungsmodus
+import gpxpy  # GPX-Export der Teile/Punkte im Planungsmodus
 import gpxpy.gpx
 import numpy as np  # Numerische Hilfsfunktionen (Arrays, NaN-Handling)
 import pandas as pd
@@ -85,7 +85,7 @@ con = get_connection()
 # --------------------------------------------------------------------------
 # Datenzugriff (gecacht)
 # --------------------------------------------------------------------------
-#@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_metadata() -> pd.DataFrame:
     """
     Lädt nur die "leichten" Metadaten aller Tracks (Titel, Bounding-Box,
@@ -123,7 +123,7 @@ def load_metadata() -> pd.DataFrame:
         """).fetchdf()
 
 
-#@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_track_files(track_ids: tuple) -> pd.DataFrame:
     """
     Lädt die GPX-Binärdaten NUR für die übergebenen track_ids.
@@ -330,7 +330,7 @@ def _format_distance_km(meters: float) -> str:
     """Formatiert eine Distanz in Metern als Kilometer-Text, z.B. '12.3 km'."""
     if pd.isna(meters):
         return "–"
-    return f"{meters / 1000:.1f} km"
+    return f"{meters / 1000:,.1f} km"
 
 
 def _format_duration(seconds: float) -> str:
@@ -339,14 +339,59 @@ def _format_duration(seconds: float) -> str:
         return "–"
     total_minutes = int(round(seconds / 60))
     hours, minutes = divmod(total_minutes, 60)
-    return f"{hours}h {minutes:02d}min"
+    return f"{hours}:{minutes:02d} h"
 
 
 def _format_meters(value: float) -> str:
     """Formatiert einen Höhen-/Auf-/Abstiegswert in Metern, z.B. '1234 m'."""
     if pd.isna(value):
         return "–"
-    return f"{value:.0f} m"
+    return f"{value:,.0f} m"
+
+
+# --------------------------------------------------------------------------
+# Hover-Kennzahlen je Punkt (Karte + Höhenprofil)
+# --------------------------------------------------------------------------
+def _build_hover_texts(gdf: pd.DataFrame, track_title: str) -> pd.Series:
+    """
+    Baut für JEDEN Punkt eines verarbeiteten Track-DataFrames (siehe
+    functions.process_track) einen mehrzeiligen HTML-Hovertext mit den
+    Kennzahlen an genau dieser Stelle (Distanz, Höhe, Tempo, Gefälle,
+    vergangene Zeit seit Trackstart).
+
+    Wird für ZWEI Zwecke verwendet, damit Karte und Höhenprofil beim Hover
+    exakt dieselben Werte an derselben Stelle anzeigen:
+        - als Tooltip-Text der (dünn gesäten) Hover-Marker auf der Karte
+          (siehe _render_map_and_profile)
+        - als 'text' der Plotly-Trace des Höhenprofils, dort über
+          'hovertemplate="%{text}..."' eingebunden
+
+    Bewusst spaltenweise vektorisiert (statt einer Python-Schleife mit
+    Einzel-Format-Aufrufen je Punkt), da ein Track durchaus mehrere tausend
+    Punkte enthalten kann.
+
+    'distance' wird unverändert aus 'gdf' übernommen - im
+    Mehrtrack-Höhenprofil ist das bereits die über alle ausgewählten Tracks
+    hinweg aufsummierte Strecke (siehe _render_map_and_profile), wodurch der
+    Hover-Wert exakt der x-Achsen-Position im Profil entspricht.
+    """
+    distance_km = (gdf["distance"] / 1000).round(2)
+    elevation_m = gdf["ele"].fillna(0).round(0).astype(int)
+    speed_kmh = gdf["km_per_h"].fillna(0).round(1)
+    slope_pct = gdf["slope"].fillna(0).round(1)
+    elapsed = gdf["time_passed"].apply(
+        lambda td: _format_duration(td.total_seconds()) if pd.notna(td) else "–"
+    )
+
+    title_html = f"<b>{track_title}</b><br>" if track_title else ""
+    return (
+        title_html
+        + "📍 " + distance_km.astype(str) + " km<br>"
+        + "⛰️ " + elevation_m.astype(str) + " m<br>"
+        + "🚀 " + speed_kmh.astype(str) + " km/h<br>"
+        + "📐 " + slope_pct.astype(str) + " %<br>"
+        + "⏱️ " + elapsed
+    )
 
 
 def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
@@ -371,10 +416,17 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
 
     'subheader' erlaubt es, dieselbe Funktion auch im Planungsmodus
     wiederzuverwenden: _render_planning_kpis() übergibt dort ein DataFrame
-    mit denselben Spalten, aber einer Zeile je ABSCHNITT (statt je Track)
+    mit denselben Spalten, aber einer Zeile je Teil (statt je Track)
     und einer entsprechend angepassten Überschrift - siehe dort.
     """
     st.subheader(subheader)
+    st.slider(
+        "Breite anpassen",
+        min_value=10,
+        max_value=35,
+        key="kpi_col_width_pct",
+        help="Breite dieser Spalte gegenüber der Karte rechts daneben.",
+    )
 
     descent_abs = df["track_descent_m"].abs()
 
@@ -400,28 +452,23 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
         with col_tracks:
             for title, value in zip(df["track_title"], per_track_values):
                 st.caption(f"{title}: {formatter(value)}")    
-            #track_text = "  ·  ".join(
-            #    f"{title}: {formatter(value)}"
-            #    for title, value in zip(df["track_title"], per_track_values)
-            #)
-            #st.caption(track_text)
-        
+
 
 
 # --------------------------------------------------------------------------
-# Planungsmodus: Track in Abschnitte unterteilen, Kennzahlen je Abschnitt,
+# Planungsmodus: Track in Teile unterteilen, Kennzahlen je Teil,
 # GPX-Export
 # --------------------------------------------------------------------------
 def _segment_bounds(n_points: int, split_indices: list[int]) -> list[tuple[int, int]]:
     """
     Wandelt eine Liste von Unterteilungspunkt-Indizes in die (jeweils
-    INKLUSIVEN) Start-/End-Indizes der daraus entstehenden Abschnitte um.
+    INKLUSIVEN) Start-/End-Indizes der daraus entstehenden Teile um.
 
-    Ohne Unterteilungspunkte ergibt sich genau ein Abschnitt (der gesamte
+    Ohne Unterteilungspunkte ergibt sich genau ein Teil (der gesamte
     Track, von Index 0 bis zum letzten Index). Aufeinanderfolgende
-    Abschnitte teilen sich jeweils ihren Grenzpunkt (Ende von Abschnitt N =
-    Anfang von Abschnitt N+1) - dadurch ergibt die Summe der
-    Abschnitts-Kennzahlen (siehe _summarize_segment) wieder exakt die
+    Teile teilen sich jeweils ihren Grenzpunkt (Ende von Teil N =
+    Anfang von Teil N+1) - dadurch ergibt die Summe der
+    Teils-Kennzahlen (siehe _summarize_segment) wieder exakt die
     Kennzahlen des Gesamttracks, ohne den gemeinsamen Punkt doppelt zu
     zählen (seine eigene Distanz/Zeit zu sich selbst ist 0).
     """
@@ -435,7 +482,7 @@ def _segment_bounds(n_points: int, split_indices: list[int]) -> list[tuple[int, 
 
 def _summarize_segment(gdf: pd.DataFrame, start_idx: int, end_idx: int) -> dict:
     """
-    Berechnet die Kennzahlen EINES Abschnitts (Punkte start_idx bis
+    Berechnet die Kennzahlen EINES Teils (Punkte start_idx bis
     end_idx, beide inklusive) eines bereits verarbeiteten Track-DataFrames
     (siehe functions.process_track) - analog zu summarize_track() in
     functions.py, aber für einen Teilbereich statt den gesamten Track.
@@ -446,35 +493,35 @@ def _summarize_segment(gdf: pd.DataFrame, start_idx: int, end_idx: int) -> dict:
 
     Länge und Gesamtzeit werden als Differenz der bereits über den
     GESAMTEN Track kumulierten Spalten 'distance' bzw. 'time_passed'
-    gebildet (Ende minus Anfang) statt den Abschnitt isoliert neu zu
+    gebildet (Ende minus Anfang) statt den Teil isoliert neu zu
     berechnen - das ist gleichwertig, aber günstiger.
 
     Auf-/Abstieg sowie "Zeit in Bewegung" dagegen NICHT als einfache
     Differenz, sondern über dieselben Schwellwert-Funktionen wie der
     Gesamttrack (compute_ascent_descent / compute_moving_time_s),
-    angewendet NUR auf die Punkte dieses Abschnitts: Das Schwellwert-
+    angewendet NUR auf die Punkte dieses Teils: Das Schwellwert-
     Verfahren für Auf-/Abstieg hängt vom jeweils zuletzt erreichten
-    Bezugspunkt ab, der an jeder Abschnittsgrenze neu beginnt - eine
+    Bezugspunkt ab, der an jeder Teilsgrenze neu beginnt - eine
     Differenz der kumulierten Gesamttrack-Werte wäre hier NICHT
     gleichwertig. Verwendet werden dabei die Standard-Schwellwerte
     (DEFAULT_MIN_ELEVATION_CHANGE_M / DEFAULT_MIN_SPEED_MOVING_KMH); wurde
     ein Track in der Verwaltung mit abweichenden Schwellwerten neu
-    berechnet, können die Abschnitts-Summen daher in seltenen Fällen
+    berechnet, können die Teils-Summen daher in seltenen Fällen
     minimal von den (in der Datenbank gespeicherten) Gesamttrack-Werten
     abweichen, da diese individuellen Schwellwerte hier nicht
     gespeichert/bekannt sind.
     """
     segment = gdf.iloc[start_idx : end_idx + 1].reset_index(drop=True)
     ascent_m, descent_m = compute_ascent_descent(segment, DEFAULT_MIN_ELEVATION_CHANGE_M)
-    # Für "Zeit in Bewegung" wird die ERSTE Zeile des Abschnitts
+    # Für "Zeit in Bewegung" wird die ERSTE Zeile des Teils
     # ausgenommen: ihr 'time_delta' (siehe process_gpx_dataframe)
     # beschreibt das Intervall VOM VORHERIGEN Punkt zu diesem
-    # Abschnitts-Startpunkt und gehört damit fachlich zum VORHERIGEN
-    # Abschnitt, dessen letzter Punkt genau dieser (gemeinsame)
+    # Teils-Startpunkt und gehört damit fachlich zum VORHERIGEN
+    # Teil, dessen letzter Punkt genau dieser (gemeinsame)
     # Grenzpunkt ist - würde sie hier mitgezählt, würde dieses Intervall
     # doppelt in die Summe einfließen (einmal als letztes Intervall des
-    # vorherigen, einmal als "erstes" dieses Abschnitts). Beim
-    # allerersten Abschnitt (start_idx == 0) ist 'time_delta' an Position
+    # vorherigen, einmal als "erstes" dieses Teils). Beim
+    # allerersten Teil (start_idx == 0) ist 'time_delta' an Position
     # 0 ohnehin bereits 0 (kein Vorgänger vorhanden), das Ausschließen
     # ändert dort also nichts am Ergebnis.
     moving_s = compute_moving_time_s(segment.iloc[1:], DEFAULT_MIN_SPEED_MOVING_KMH)
@@ -523,7 +570,7 @@ def _toggle_split_point(track_id: str, point_index: int, n_points: int) -> bool:
 
     Start- und Endpunkt des Tracks (Index 0 bzw. n_points - 1) können
     nicht als Unterteilungspunkt gesetzt werden, da sie ohnehin bereits
-    die äußeren Abschnittsgrenzen bilden - ein Klick dorthin wird
+    die äußeren Teilsgrenzen bilden - ein Klick dorthin wird
     ignoriert.
 
     Gibt zurück, ob sich dadurch tatsächlich etwas verändert hat (False
@@ -600,7 +647,7 @@ def _build_planning_export_zip(
 ) -> bytes:
     """
     Baut die ZIP-Datei für den Export-Button des Planungsmodus: je
-    Abschnitt eine eigenständige GPX-Datei (_gdf_slice_to_gpx_xml) sowie -
+    Teil eine eigenständige GPX-Datei (_gdf_slice_to_gpx_xml) sowie -
     sofern mindestens ein Unterteilungspunkt gesetzt ist - eine weitere
     GPX-Datei mit allen Punkten als Wegpunkte (_split_points_to_gpx_xml).
     Gibt die fertige ZIP-Datei als Bytes zurück (für st.download_button).
@@ -610,9 +657,9 @@ def _build_planning_export_zip(
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for n, (start_idx, end_idx) in enumerate(bounds, start=1):
             xml = _gdf_slice_to_gpx_xml(
-                gdf, start_idx, end_idx, name=f"{track_title} – Abschnitt {n}"
+                gdf, start_idx, end_idx, name=f"{track_title} – Teil {n}"
             )
-            zf.writestr(f"{base_name}_abschnitt_{n:02d}.gpx", xml)
+            zf.writestr(f"{base_name}_Teil_{n:02d}.gpx", xml)
         if split_indices:
             xml_points = _split_points_to_gpx_xml(gdf, split_indices)
             zf.writestr(f"{base_name}_punkte.gpx", xml_points)
@@ -622,13 +669,13 @@ def _build_planning_export_zip(
 def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) -> None:
     """
     Planungsmodus-Variante von _render_kpis(): zeigt statt der Kennzahlen
-    je Track die Kennzahlen je ABSCHNITT eines einzelnen Tracks (der
+    je Track die Kennzahlen je Teil eines einzelnen Tracks (der
     Planungsmodus ist nur bei genau einem ausgewählten Track aktivierbar -
     siehe render_map_page). Dafür wird ein DataFrame mit einer Zeile je
-    Abschnitt gebaut (Spalten wie eine normale Track-Zeile, siehe
+    Teil gebaut (Spalten wie eine normale Track-Zeile, siehe
     _summarize_segment) und direkt an _render_kpis() übergeben - dadurch
     bleiben Formatierung und KPI-Zeilen (inkl. künftiger Änderungen daran)
-    automatisch zwischen Track- und Abschnitts-Ansicht konsistent.
+    automatisch zwischen Track- und Teils-Ansicht konsistent.
 
     Darunter folgen die Liste der gesetzten Unterteilungspunkte (je mit
     Lösch-Button) sowie der Export-Button (siehe
@@ -644,15 +691,15 @@ def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) ->
     bounds = _segment_bounds(len(gdf), split_indices)
 
     seg_df = pd.DataFrame([_summarize_segment(gdf, a, b) for a, b in bounds])
-    seg_df["track_title"] = [f"Abschnitt {n}" for n in range(1, len(bounds) + 1)]
+    seg_df["track_title"] = [f"Teil {n}" for n in range(1, len(bounds) + 1)]
 
     if len(bounds) <= 1:
         st.info(
             "Noch keine Unterteilungspunkte gesetzt - klicke ins "
-            "Höhenprofil, um den Track in Abschnitte zu unterteilen."
+            "Höhenprofil, um den Track in Teile zu unterteilen."
         )
 
-    _render_kpis(seg_df, subheader="Kennzahlen – Abschnitte")
+    _render_kpis(seg_df, subheader="Kennzahlen – Teile")
 
     # ------------------------------------------------------------------
     # Unterteilungspunkte: Liste mit Lösch-Button je Punkt
@@ -673,7 +720,7 @@ def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) ->
                     st.rerun()
 
     # ------------------------------------------------------------------
-    # Export: je Abschnitt eine GPX-Datei + eine GPX-Datei mit den Punkten
+    # Export: je Teil eine GPX-Datei + eine GPX-Datei mit den Punkten
     # ------------------------------------------------------------------
     st.divider()
     zip_bytes = _build_planning_export_zip(gdf, track_title, bounds, split_indices)
@@ -685,7 +732,7 @@ def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) ->
         key="planning_export_button",
         width="stretch",
         help=(
-            "Lädt eine ZIP-Datei herunter: je eine GPX-Datei pro Abschnitt "
+            "Lädt eine ZIP-Datei herunter: je eine GPX-Datei pro Teil "
             "sowie eine weitere GPX-Datei mit den Unterteilungspunkten als "
             "Wegpunkte."
         ),
@@ -705,7 +752,7 @@ def _render_map_and_profile(
     aufgerufen (Kennzahlen links, Karte + Höhenprofil rechts daneben -
     siehe dortige Spaltenaufteilung).
 
-    'planning_mode' aktiviert die Unterteilung in Abschnitte per Mausklick
+    'planning_mode' aktiviert die Unterteilung in Teile per Mausklick
     - im Höhenprofil ODER direkt auf der Karte (siehe _toggle_split_point,
     _nearest_point_index) - sowie deren farbliche Hervorhebung auf Karte
     und Höhenprofil; gilt nur sinnvoll, wenn 'df' genau einen Track enthält
@@ -860,6 +907,11 @@ def _render_map_and_profile(
 
         track_store[track_id] = gdf
 
+        # Hover-Kennzahlen je Punkt - einmal pro Track berechnet, weiter
+        # unten sowohl für die Hover-Marker auf der Karte als auch für das
+        # Höhenprofil verwendet (siehe _build_hover_texts).
+        hover_texts = _build_hover_texts(gdf, df["track_title"].iloc[i])
+
         # Unterteilungspunkte DIESES Tracks (Planungsmodus) - einmal hier
         # ermittelt, weiter unten sowohl für die Marker auf der Karte als
         # auch für die Hervorhebung im Höhenprofil verwendet.
@@ -872,7 +924,7 @@ def _render_map_and_profile(
 
         folium.CircleMarker(
             [gdf["lat"].iloc[0], gdf["lon"].iloc[0]],
-            tooltip="Start",
+            tooltip="<b>Start</b><br>" + hover_texts.iloc[0],
             fill=True,
             fill_color="green",
             radius=10,
@@ -883,7 +935,7 @@ def _render_map_and_profile(
         ).add_to(m)
         folium.CircleMarker(
             [gdf["lat"].iloc[-1], gdf["lon"].iloc[-1]],
-            tooltip="Ende",
+            tooltip="<b>Ende</b><br>" + hover_texts.iloc[-1],
             fill=True,
             fill_color="red",
             radius=10,
@@ -907,6 +959,37 @@ def _render_map_and_profile(
             colormap=track_col,
             weight=5,
         ).add_to(m)
+
+        # --- Karte: Hover-Marker mit Kennzahlen je Punkt ----------------
+        # Eine durchgehende Linie (ColorLine oben) kann in Folium/Leaflet
+        # selbst keinen punktgenauen Hover anbieten - dafür braucht es
+        # eigene Marker je Punkt. Da ein Track durchaus mehrere tausend
+        # Punkte enthalten kann, würde EIN Marker pro Punkt die Karte mit
+        # ebenso vielen DOM-Elementen überladen und spürbar verlangsamen -
+        # daher wird hier eine über den Track verteilte Auswahl an Punkten
+        # verwendet ('hover_stride'), die zudem mit der Anzahl gleichzeitig
+        # angezeigter Tracks sinkt, damit auch bei vielen ausgewählten
+        # Tracks insgesamt nicht zu viele Marker entstehen. Start- und
+        # Endpunkt sind durch die eigenen Marker oben bereits abgedeckt,
+        # werden hier aber der Einfachheit halber (harmlos) mit erfasst.
+        #
+        # Die Marker selbst bleiben praktisch unsichtbar (fill_opacity nur
+        # knapp über 0, statt exakt 0): Ein Kreis mit fill_opacity=0 würde
+        # vom Browser nicht mehr als "gefüllt" gewertet und entsprechend
+        # auch keine Hover-Ereignisse mehr auslösen.
+        target_hover_points = max(15, 700 // max(1, len(df)))
+        hover_stride = max(1, len(gdf) // target_hover_points)
+        for idx in range(0, len(gdf), hover_stride):
+            row = gdf.iloc[idx]
+            folium.CircleMarker(
+                [row["lat"], row["lon"]],
+                tooltip=hover_texts.iloc[idx],
+                radius=10,
+                fill=True,
+                fill_opacity=0.01,
+                opacity=0,
+                weight=0,
+            ).add_to(m)
 
         # Unterteilungspunkte (Planungsmodus) als eigene, orange Marker -
         # dauerhaft sichtbar, im Gegensatz zum (gelben) zuletzt
@@ -980,6 +1063,13 @@ def _render_map_and_profile(
                     start=range_elevation[0] * 0.9,
                     stop=range_elevation[1] * 1.1,
                 ),
+                # Hover zeigt dieselben Kennzahlen wie die Hover-Marker auf
+                # der Karte (siehe _build_hover_texts) - "<extra></extra>"
+                # unterdrückt die sonst zusätzlich angezeigte Trace-Box mit
+                # Tracename/Farbsample.
+                text=hover_texts,
+                hoverlabel=dict(bgcolor="black"),
+                hovertemplate="%{text}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -987,6 +1077,11 @@ def _render_map_and_profile(
         # Zweite Trace: nur Start- und Endpunkt des Tracks, groß und farbig
         # hervorgehoben (analog zu den Start/Ende-Markern auf der Karte).
         # WICHTIG: Die curve_number dieser Trace ist immer ungerade (1, 3, 5, ...).
+        # hoverinfo="skip": diese Trace liegt direkt über den Start-/
+        # End-Punkten der Haupt-Trace (s.o.), die dort bereits die
+        # Kennzahlen-Hovertexte liefert - ohne "skip" würde stattdessen
+        # diese (hoverlose) Overlay-Trace den Hover an genau diesen beiden
+        # Punkten "stehlen".
         fig.add_trace(
             go.Scatter(
                 mode="markers",
@@ -997,6 +1092,7 @@ def _render_map_and_profile(
                     size=15,
                     line=dict(color="white", width=2),
                 ),
+                hoverinfo="skip",
                 showlegend=False,
             )
         )
@@ -1018,8 +1114,15 @@ def _render_map_and_profile(
             weight=3,
         ).add_to(m)
 
-    folium.LayerControl().add_to(m)
     m.add_child(track_col)
+    folium.LayerControl().add_to(m)
+    folium.plugins.Fullscreen(
+    position="topleft",
+    title="Expand me",
+    title_cancel="Exit me",
+    force_separate_button=True,
+    ).add_to(m)
+    
     # BEWUSST ohne 'key=': Ändert sich der Karteninhalt spürbar (z.B. beim
     # Wechsel auf einen anderen Track), erzeugt streamlit-folium dadurch
     # automatisch einen neuen internen Schlüssel, die Komponente wird neu
@@ -1074,6 +1177,7 @@ def _render_map_and_profile(
         xaxis_fixedrange=True,
         yaxis_fixedrange=True,
         margin=dict(l=0, r=0, t=0, b=0),
+        hoverlabel=dict(bgcolor="white", font_size=13, align="left"),
     )
     # on_select="rerun": ein Klick im Profil löst einen kompletten
     # Skript-Rerun aus; "event" enthält danach die Klick-Information
@@ -1252,7 +1356,7 @@ def render_map_page() -> None:
         # ------------------------------------------------------------------
         # Planungsmodus (Tourenplanung): nur aktivierbar bei GENAU einem
         # ausgewählten Track, da sich nur ein einzelner Track sinnvoll in
-        # Abschnitte unterteilen lässt (siehe Modul-Docstring, Punkt 4).
+        # Teile unterteilen lässt (siehe Modul-Docstring, Punkt 4).
         # Fällt die Bedingung weg (z.B. weitere Tracks dazu ausgewählt,
         # während der Modus bereits aktiv war), wird er automatisch wieder
         # deaktiviert, statt nur das Steuerelement zu sperren.
@@ -1267,7 +1371,7 @@ def render_map_page() -> None:
             disabled=not single_track_selected,
             help=(
                 "Im Planungsmodus lässt sich der ausgewählte Track per "
-                "Klick auf die Karte oder ins Höhenprofil in Abschnitte "
+                "Klick auf die Karte oder ins Höhenprofil in Teile "
                 "unterteilen. Dafür muss genau ein Track ausgewählt sein."
             ),
         )
@@ -1296,7 +1400,19 @@ def render_map_page() -> None:
     # ----------------------------------------------------------------------
     # Hauptbereich: Kennzahlen links, Karte + Höhenprofil rechts daneben
     # ----------------------------------------------------------------------
-    col_kpis, col_map = st.columns([1, 6], gap="small")
+    # Die Breite der linken Spalte (in Prozent) lässt sich über einen
+    # Schieberegler INNERHALB dieser Spalte einstellen (siehe _render_kpis,
+    # direkt unter der Überschrift "Kennzahlen") - st.columns() braucht die
+    # Breiten aber bereits HIER, bevor der Spalteninhalt (und damit der
+    # Schieberegler selbst) gerendert wird. Daher zunächst der zuletzt
+    # gespeicherte Wert aus session_state (mit Default beim allerersten
+    # Aufruf); der Schieberegler aktualisiert denselben Schlüssel weiter
+    # unten und wirkt damit ab dem NÄCHSTEN Rerun (das Verschieben des
+    # Reglers selbst löst bereits einen Rerun aus).
+    if "kpi_col_width_pct" not in st.session_state:
+        st.session_state.kpi_col_width_pct = 15
+    kpi_width_pct = st.session_state.kpi_col_width_pct
+    col_kpis, col_map = st.columns([kpi_width_pct, 100 - kpi_width_pct], gap="small")
 
     with col_kpis:
         with st.container(border=True):

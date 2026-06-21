@@ -54,7 +54,7 @@ DEFAULT_MIN_ELEVATION_CHANGE_M = 2.0
 # ---------------------------------------------------------------------------
 # Datenbank
 # ---------------------------------------------------------------------------
-#@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def get_connection() -> duckdb.DuckDBPyConnection:
     """
     Liefert die (einzige) DuckDB-Verbindung dieses Streamlit-Prozesses.
@@ -266,7 +266,7 @@ def process_gpx_dataframe(gpx_bytes: bytes) -> gpd.GeoDataFrame:
     return gdf
 
 
-#@st.cache_data(show_spinner="GPX-Daten werden verarbeitet …")
+@st.cache_data(show_spinner="GPX-Daten werden verarbeitet …")
 def process_track(track_id: str, _gpx_bytes: bytes) -> pd.DataFrame:
     """
     Gecachte Hülle um process_gpx_dataframe() für die Kartenansicht:
@@ -441,7 +441,7 @@ def summarize_track(
 # ---------------------------------------------------------------------------
 # Geocoding & Zeitzone
 # ---------------------------------------------------------------------------
-#@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def reverse_geocode(lat: float, lon: float) -> dict:
     """
     Reverse-Geocoding eines Punktes über OpenStreetMap/Nominatim.
@@ -466,7 +466,7 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     }
 
 
-#@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def get_timezone(lat: float, lon: float) -> str | None:
     """Ermittelt die IANA-Zeitzone (z.B. 'Europe/Berlin') für einen Punkt."""
     tf = TimezoneFinder()
@@ -772,8 +772,45 @@ def insert_track(data: dict) -> None:
     con = get_connection()
     row = pd.DataFrame([data])  # noqa: F841 (von DuckDB per Namen referenziert)
 
+    # WICHTIG: Die Ziel-Spaltenliste wird hier bewusst EXPLIZIT angegeben
+    # (statt "INSERT INTO gpx SELECT ... FROM row"). Ohne sie ordnet DuckDB
+    # die SELECT-Spalten dem Ziel rein POSITIONAL zu - das bricht, sobald
+    # die physische Spaltenreihenfolge der Tabelle von der hier (und in
+    # init_database()) verwendeten Reihenfolge abweicht. Genau das passiert
+    # bei per ALTER TABLE ... ADD COLUMN nachträglich ergänzten Spalten
+    # (siehe _ensure_schema_migrations): DuckDB hängt neue Spalten IMMER
+    # ans Ende der Tabelle an, unabhängig davon, wo sie in init_database()
+    # "logisch" stehen. Bei Bestandsdatenbanken landet 'track_time_moving_s'
+    # also tatsächlich als letzte Spalte, nicht zwischen 'track_time_s' und
+    # 'track_distance_m'. Eine rein positionale Zuordnung verschiebt dann
+    # alle nachfolgenden Werte um eins - mit dem Ergebnis, dass am Ende
+    # 'file_data' (BLOB) in die 'time_stamp'-Spalte (TIMESTAMP) einsortiert
+    # wird, was den (sonst kryptischen) Fehler "Unimplemented type for cast
+    # (BLOB -> TIMESTAMP)" auslöst. Mit expliziter Spaltenliste matcht
+    # DuckDB stattdessen über die NAMEN und ist damit unabhängig von der
+    # physischen Speicherreihenfolge.
     con.sql("""
-        INSERT INTO gpx
+        INSERT INTO gpx (
+            track_id, track_title, sport_id, tour_id,
+
+            location_start_country, location_start_state, location_start_county,
+            location_start_town, location_start_suburb, location_start_road,
+
+            location_end_country, location_end_state, location_end_county,
+            location_end_town, location_end_suburb, location_end_road,
+
+            location_start_lat_lon, location_end_lat_lon,
+            location_start_address, location_end_address,
+
+            location_lat_min, location_lat_max, location_lon_min, location_lon_max,
+
+            time_zone, time_start, time_end, track_time_s, track_time_moving_s,
+            track_distance_m, track_ascent_m, track_descent_m,
+
+            elevation_min, elevation_max, speed_min, speed_max, slope_min, slope_max,
+
+            file_name, file_data, time_stamp
+        )
         SELECT
             CAST(track_id AS UUID)            AS track_id,
             TRY_CAST(track_title AS VARCHAR)  AS track_title,
