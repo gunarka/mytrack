@@ -29,6 +29,22 @@ Aufbau der Seite:
 3. Klick-Interaktion: Klickt man im Höhenprofil auf einen Punkt, wird dieser
    Punkt im Profil größer dargestellt UND als zusätzlicher Marker auf der
    Karte eingezeichnet, auf den die Karte zentriert wird.
+4. Planungsmodus (Tourenplanung): Über den Button "📐 Planung" in der
+   Seitenleiste - nur aktivierbar, wenn genau EIN Track ausgewählt ist -
+   lässt sich dieser Track in Abschnitte unterteilen. Die
+   Unterteilungspunkte werden per Mausklick gesetzt - entweder wie der
+   normale Klick aus Punkt 3 im Höhenprofil, oder direkt auf der Karte
+   (dort wird der nächstgelegene Trackpunkt zum Klick ermittelt, siehe
+   _nearest_point_index); ein erneuter Klick auf einen bereits gesetzten
+   Punkt entfernt ihn wieder (siehe _toggle_split_point /
+   _render_map_and_profile). Alternativ lässt sich jeder Punkt über ein
+   "✕" in der Kennzahlen-Box löschen (siehe _render_planning_kpis). Die
+   Kennzahlen-Box zeigt in diesem Modus die Werte je Abschnitt statt je
+   Track (Wiederverwendung von _render_kpis mit einem pro Abschnitt
+   gebauten DataFrame, siehe _summarize_segment). Ein Export-Button
+   darunter erzeugt eine ZIP-Datei mit je einer GPX-Datei pro Abschnitt
+   sowie einer weiteren GPX-Datei mit den gesetzten Punkten als Wegpunkte
+   (siehe _build_planning_export_zip).
 
 Performance-Hinweis: GPX-Dateien werden aus DuckDB geladen und mit GeoPandas
 aufwendig nachbearbeitet (Distanz, Tempo, Steigung, ...). Da Streamlit bei
@@ -37,15 +53,27 @@ einfachen Klick im Profil), wird diese Verarbeitung über st.cache_data
 gecacht - siehe process_track() in functions.py.
 """
 
+import io  # ZIP-Export im Planungsmodus (in-memory statt temporärer Dateien)
+import zipfile  # ZIP-Export im Planungsmodus
+
 import folium  # Erzeugt die interaktive Leaflet-Karte
 import branca.colormap as cm  # Farbskala für die Karten-Einfärbung
+import gpxpy  # GPX-Export der Abschnitte/Punkte im Planungsmodus
+import gpxpy.gpx
 import numpy as np  # Numerische Hilfsfunktionen (Arrays, NaN-Handling)
 import pandas as pd
 import plotly.graph_objects as go  # Höhenprofil-Diagramm
 import streamlit as st  # Web-UI-Framework
 from streamlit_folium import st_folium  # Rendert eine Folium-Karte in Streamlit
 
-from functions import get_connection, process_track
+from functions import (
+    DEFAULT_MIN_ELEVATION_CHANGE_M,
+    DEFAULT_MIN_SPEED_MOVING_KMH,
+    compute_ascent_descent,
+    compute_moving_time_s,
+    get_connection,
+    process_track,
+)
 
 # Die Verbindung wird beim ersten Import dieses Moduls einmalig über
 # functions.get_connection() geholt (siehe dortige Erläuterung zu
@@ -321,7 +349,7 @@ def _format_meters(value: float) -> str:
     return f"{value:.0f} m"
 
 
-def _render_kpis(df: pd.DataFrame) -> None:
+def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
     """
     Zeigt Kennzahlen zu den aktuell ausgewählten Tracks an: pro Kennzahl
     (Länge, Zeit, Auf-/Abstieg, Min/Max-Höhe) eine eigene, am linken Rand
@@ -340,8 +368,13 @@ def _render_kpis(df: pd.DataFrame) -> None:
     abgelegt (siehe summarize_track() in functions.py). Für die Anzeige
     hier wird der Betrag gebildet, damit "Abstieg" wie "Aufstieg" als
     positive Meterzahl erscheint.
+
+    'subheader' erlaubt es, dieselbe Funktion auch im Planungsmodus
+    wiederzuverwenden: _render_planning_kpis() übergibt dort ein DataFrame
+    mit denselben Spalten, aber einer Zeile je ABSCHNITT (statt je Track)
+    und einer entsprechend angepassten Überschrift - siehe dort.
     """
-    st.subheader("Kennzahlen")
+    st.subheader(subheader)
 
     descent_abs = df["track_descent_m"].abs()
 
@@ -361,7 +394,7 @@ def _render_kpis(df: pd.DataFrame) -> None:
     # daneben für die kleingedruckten Einzelwerte je Track.
     for label, total_value, formatter, per_track_values in kpi_rows:
         st.divider()
-        col_box, col_tracks = st.columns([1, 1])
+        col_box, col_tracks = st.columns([3, 2])
         with col_box:
             st.metric(label, formatter(total_value))
         with col_tracks:
@@ -375,7 +408,295 @@ def _render_kpis(df: pd.DataFrame) -> None:
         
 
 
-def _render_map_and_profile(df: pd.DataFrame) -> None:
+# --------------------------------------------------------------------------
+# Planungsmodus: Track in Abschnitte unterteilen, Kennzahlen je Abschnitt,
+# GPX-Export
+# --------------------------------------------------------------------------
+def _segment_bounds(n_points: int, split_indices: list[int]) -> list[tuple[int, int]]:
+    """
+    Wandelt eine Liste von Unterteilungspunkt-Indizes in die (jeweils
+    INKLUSIVEN) Start-/End-Indizes der daraus entstehenden Abschnitte um.
+
+    Ohne Unterteilungspunkte ergibt sich genau ein Abschnitt (der gesamte
+    Track, von Index 0 bis zum letzten Index). Aufeinanderfolgende
+    Abschnitte teilen sich jeweils ihren Grenzpunkt (Ende von Abschnitt N =
+    Anfang von Abschnitt N+1) - dadurch ergibt die Summe der
+    Abschnitts-Kennzahlen (siehe _summarize_segment) wieder exakt die
+    Kennzahlen des Gesamttracks, ohne den gemeinsamen Punkt doppelt zu
+    zählen (seine eigene Distanz/Zeit zu sich selbst ist 0).
+    """
+    if n_points <= 1:
+        return [(0, max(n_points - 1, 0))]
+    boundaries = sorted(
+        {0, n_points - 1} | {i for i in split_indices if 0 < i < n_points - 1}
+    )
+    return list(zip(boundaries[:-1], boundaries[1:]))
+
+
+def _summarize_segment(gdf: pd.DataFrame, start_idx: int, end_idx: int) -> dict:
+    """
+    Berechnet die Kennzahlen EINES Abschnitts (Punkte start_idx bis
+    end_idx, beide inklusive) eines bereits verarbeiteten Track-DataFrames
+    (siehe functions.process_track) - analog zu summarize_track() in
+    functions.py, aber für einen Teilbereich statt den gesamten Track.
+    Die zurückgegebenen Schlüssel entsprechen bewusst den Spaltennamen, die
+    _render_kpis() von einer Track-Zeile erwartet (track_distance_m, ...),
+    damit _render_planning_kpis() für die Anzeige direkt _render_kpis()
+    wiederverwenden kann.
+
+    Länge und Gesamtzeit werden als Differenz der bereits über den
+    GESAMTEN Track kumulierten Spalten 'distance' bzw. 'time_passed'
+    gebildet (Ende minus Anfang) statt den Abschnitt isoliert neu zu
+    berechnen - das ist gleichwertig, aber günstiger.
+
+    Auf-/Abstieg sowie "Zeit in Bewegung" dagegen NICHT als einfache
+    Differenz, sondern über dieselben Schwellwert-Funktionen wie der
+    Gesamttrack (compute_ascent_descent / compute_moving_time_s),
+    angewendet NUR auf die Punkte dieses Abschnitts: Das Schwellwert-
+    Verfahren für Auf-/Abstieg hängt vom jeweils zuletzt erreichten
+    Bezugspunkt ab, der an jeder Abschnittsgrenze neu beginnt - eine
+    Differenz der kumulierten Gesamttrack-Werte wäre hier NICHT
+    gleichwertig. Verwendet werden dabei die Standard-Schwellwerte
+    (DEFAULT_MIN_ELEVATION_CHANGE_M / DEFAULT_MIN_SPEED_MOVING_KMH); wurde
+    ein Track in der Verwaltung mit abweichenden Schwellwerten neu
+    berechnet, können die Abschnitts-Summen daher in seltenen Fällen
+    minimal von den (in der Datenbank gespeicherten) Gesamttrack-Werten
+    abweichen, da diese individuellen Schwellwerte hier nicht
+    gespeichert/bekannt sind.
+    """
+    segment = gdf.iloc[start_idx : end_idx + 1].reset_index(drop=True)
+    ascent_m, descent_m = compute_ascent_descent(segment, DEFAULT_MIN_ELEVATION_CHANGE_M)
+    # Für "Zeit in Bewegung" wird die ERSTE Zeile des Abschnitts
+    # ausgenommen: ihr 'time_delta' (siehe process_gpx_dataframe)
+    # beschreibt das Intervall VOM VORHERIGEN Punkt zu diesem
+    # Abschnitts-Startpunkt und gehört damit fachlich zum VORHERIGEN
+    # Abschnitt, dessen letzter Punkt genau dieser (gemeinsame)
+    # Grenzpunkt ist - würde sie hier mitgezählt, würde dieses Intervall
+    # doppelt in die Summe einfließen (einmal als letztes Intervall des
+    # vorherigen, einmal als "erstes" dieses Abschnitts). Beim
+    # allerersten Abschnitt (start_idx == 0) ist 'time_delta' an Position
+    # 0 ohnehin bereits 0 (kein Vorgänger vorhanden), das Ausschließen
+    # ändert dort also nichts am Ergebnis.
+    moving_s = compute_moving_time_s(segment.iloc[1:], DEFAULT_MIN_SPEED_MOVING_KMH)
+    return {
+        "track_distance_m": float(gdf["distance"].iloc[end_idx] - gdf["distance"].iloc[start_idx]),
+        "track_time_s": float(
+            (gdf["time_passed"].iloc[end_idx] - gdf["time_passed"].iloc[start_idx]).total_seconds()
+        ),
+        "track_time_moving_s": moving_s,
+        "track_ascent_m": ascent_m,
+        "track_descent_m": descent_m,
+        "elevation_min": float(segment["ele"].min()),
+        "elevation_max": float(segment["ele"].max()),
+    }
+
+
+def _nearest_point_index(gdf: pd.DataFrame, lat: float, lon: float) -> int:
+    """
+    Findet den Index des Punktes in 'gdf' (Spalten 'lat'/'lon' in Grad), der
+    einem Klick auf der Karte am nächsten liegt - für die Zuordnung eines
+    Kartenklicks (siehe st_folium-Rückgabewert 'last_clicked' in
+    _render_map_and_profile) zu einem konkreten Trackpunkt im
+    Planungsmodus.
+
+    Die Entfernung wird dabei nur NÄHERUNGSWEISE in einer lokal-ebenen
+    Projektion bestimmt (Breitengrad direkt in Meter umgerechnet,
+    Längengrad zusätzlich mit cos(Breite) skaliert, da Längengrade in
+    Richtung der Pole "schmaler" werden) statt geodätisch exakt - für die
+    Suche nach dem NÄCHSTEN Punkt auf einem GPS-Track (Punktabstand
+    typischerweise wenige bis einige zig Meter) reicht diese Näherung
+    locker aus.
+    """
+    lat_rad = np.radians(float(gdf["lat"].mean()))
+    dx_m = (gdf["lon"] - lon) * 111_320 * np.cos(lat_rad)
+    dy_m = (gdf["lat"] - lat) * 110_540
+    return int((dx_m**2 + dy_m**2).idxmin())
+
+
+def _toggle_split_point(track_id: str, point_index: int, n_points: int) -> bool:
+    """
+    Fügt 'point_index' als Unterteilungspunkt des Tracks 'track_id' hinzu,
+    falls er dort noch nicht gesetzt ist, oder entfernt ihn wieder, falls
+    er es bereits ist - "erstellen" und "löschen" laufen also über
+    denselben Klick (siehe _render_map_and_profile, dort wird diese
+    Funktion bei jedem Klick im Planungsmodus aufgerufen).
+
+    Start- und Endpunkt des Tracks (Index 0 bzw. n_points - 1) können
+    nicht als Unterteilungspunkt gesetzt werden, da sie ohnehin bereits
+    die äußeren Abschnittsgrenzen bilden - ein Klick dorthin wird
+    ignoriert.
+
+    Gibt zurück, ob sich dadurch tatsächlich etwas verändert hat (False
+    für einen ignorierten Klick auf Start/Ende).
+    """
+    if point_index <= 0 or point_index >= n_points - 1:
+        return False
+    splits = st.session_state.split_points.setdefault(track_id, [])
+    if point_index in splits:
+        splits.remove(point_index)
+    else:
+        splits.append(point_index)
+        splits.sort()
+    return True
+
+
+def _slugify_filename(text: str) -> str:
+    """
+    Erzeugt aus einem beliebigen Titel einen einfachen, dateisystem- und
+    ZIP-sicheren Dateinamen für den Export: alles außer Buchstaben, Ziffern,
+    '_' und '-' wird durch ein Leerzeichen ersetzt, anschließend werden
+    die so entstandenen Wörter mit '_' wieder zusammengesetzt (entfernt
+    dabei automatisch mehrfache/führende/abschließende Leerzeichen).
+    """
+    cleaned = "".join(c if (c.isalnum() or c in "_-") else " " for c in text)
+    return "_".join(cleaned.split()) or "track"
+
+
+def _gdf_slice_to_gpx_xml(gdf: pd.DataFrame, start_idx: int, end_idx: int, name: str) -> str:
+    """Baut aus den Punkten start_idx bis end_idx (inklusive) eines
+    verarbeiteten Track-DataFrames eine eigenständige GPX-Datei (ein
+    <trk> mit genau einem <trkseg>) und gibt deren XML-Text zurück."""
+    gpx = gpxpy.gpx.GPX()
+    track = gpxpy.gpx.GPXTrack(name=name)
+    gpx.tracks.append(track)
+    segment = gpxpy.gpx.GPXTrackSegment()
+    track.segments.append(segment)
+    for _, row in gdf.iloc[start_idx : end_idx + 1].iterrows():
+        segment.points.append(
+            gpxpy.gpx.GPXTrackPoint(
+                latitude=float(row["lat"]),
+                longitude=float(row["lon"]),
+                elevation=float(row["ele"]) if pd.notna(row["ele"]) else None,
+                time=row["time"].to_pydatetime() if pd.notna(row["time"]) else None,
+            )
+        )
+    return gpx.to_xml()
+
+
+def _split_points_to_gpx_xml(gdf: pd.DataFrame, split_indices: list[int]) -> str:
+    """Baut aus den gesetzten Unterteilungspunkten eine eigenständige GPX-
+    Datei mit einem Wegpunkt (<wpt>) je Punkt, fortlaufend nummeriert in
+    Track-Reihenfolge, und gibt deren XML-Text zurück."""
+    gpx = gpxpy.gpx.GPX()
+    for n, idx in enumerate(sorted(split_indices), start=1):
+        row = gdf.iloc[idx]
+        gpx.waypoints.append(
+            gpxpy.gpx.GPXWaypoint(
+                latitude=float(row["lat"]),
+                longitude=float(row["lon"]),
+                elevation=float(row["ele"]) if pd.notna(row["ele"]) else None,
+                time=row["time"].to_pydatetime() if pd.notna(row["time"]) else None,
+                name=f"Punkt {n}",
+            )
+        )
+    return gpx.to_xml()
+
+
+def _build_planning_export_zip(
+    gdf: pd.DataFrame,
+    track_title: str,
+    bounds: list[tuple[int, int]],
+    split_indices: list[int],
+) -> bytes:
+    """
+    Baut die ZIP-Datei für den Export-Button des Planungsmodus: je
+    Abschnitt eine eigenständige GPX-Datei (_gdf_slice_to_gpx_xml) sowie -
+    sofern mindestens ein Unterteilungspunkt gesetzt ist - eine weitere
+    GPX-Datei mit allen Punkten als Wegpunkte (_split_points_to_gpx_xml).
+    Gibt die fertige ZIP-Datei als Bytes zurück (für st.download_button).
+    """
+    base_name = _slugify_filename(track_title)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, (start_idx, end_idx) in enumerate(bounds, start=1):
+            xml = _gdf_slice_to_gpx_xml(
+                gdf, start_idx, end_idx, name=f"{track_title} – Abschnitt {n}"
+            )
+            zf.writestr(f"{base_name}_abschnitt_{n:02d}.gpx", xml)
+        if split_indices:
+            xml_points = _split_points_to_gpx_xml(gdf, split_indices)
+            zf.writestr(f"{base_name}_punkte.gpx", xml_points)
+    return buffer.getvalue()
+
+
+def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) -> None:
+    """
+    Planungsmodus-Variante von _render_kpis(): zeigt statt der Kennzahlen
+    je Track die Kennzahlen je ABSCHNITT eines einzelnen Tracks (der
+    Planungsmodus ist nur bei genau einem ausgewählten Track aktivierbar -
+    siehe render_map_page). Dafür wird ein DataFrame mit einer Zeile je
+    Abschnitt gebaut (Spalten wie eine normale Track-Zeile, siehe
+    _summarize_segment) und direkt an _render_kpis() übergeben - dadurch
+    bleiben Formatierung und KPI-Zeilen (inkl. künftiger Änderungen daran)
+    automatisch zwischen Track- und Abschnitts-Ansicht konsistent.
+
+    Darunter folgen die Liste der gesetzten Unterteilungspunkte (je mit
+    Lösch-Button) sowie der Export-Button (siehe
+    _build_planning_export_zip) - "Export unter KPIs" im Planungsmodus.
+
+    'gdf' ist das bereits verarbeitete Track-DataFrame (siehe
+    functions.process_track) - wird von render_map_page() vorab EINMAL
+    berechnet und sowohl hierher als auch an _render_map_and_profile()
+    durchgereicht, damit der (recht teure) GPX-Aufbereitungsschritt nicht
+    zweimal pro Seitenaufruf läuft.
+    """
+    split_indices = sorted(st.session_state.split_points.get(track_id, []))
+    bounds = _segment_bounds(len(gdf), split_indices)
+
+    seg_df = pd.DataFrame([_summarize_segment(gdf, a, b) for a, b in bounds])
+    seg_df["track_title"] = [f"Abschnitt {n}" for n in range(1, len(bounds) + 1)]
+
+    if len(bounds) <= 1:
+        st.info(
+            "Noch keine Unterteilungspunkte gesetzt - klicke ins "
+            "Höhenprofil, um den Track in Abschnitte zu unterteilen."
+        )
+
+    _render_kpis(seg_df, subheader="Kennzahlen – Abschnitte")
+
+    # ------------------------------------------------------------------
+    # Unterteilungspunkte: Liste mit Lösch-Button je Punkt
+    # ------------------------------------------------------------------
+    st.divider()
+    st.caption("Unterteilungspunkte")
+    if not split_indices:
+        st.caption("– keine –")
+    else:
+        for n, idx in enumerate(split_indices, start=1):
+            row = gdf.iloc[idx]
+            col_label, col_del = st.columns([4, 1])
+            with col_label:
+                st.caption(f"Punkt {n}: {row['distance'] / 1000:.1f} km, {_format_meters(row['ele'])}")
+            with col_del:
+                if st.button("✕", key=f"del_split_{track_id}_{idx}", help="Punkt löschen"):
+                    st.session_state.split_points[track_id].remove(idx)
+                    st.rerun()
+
+    # ------------------------------------------------------------------
+    # Export: je Abschnitt eine GPX-Datei + eine GPX-Datei mit den Punkten
+    # ------------------------------------------------------------------
+    st.divider()
+    zip_bytes = _build_planning_export_zip(gdf, track_title, bounds, split_indices)
+    st.download_button(
+        "📦 Export",
+        data=zip_bytes,
+        file_name=f"{_slugify_filename(track_title)}_planung.zip",
+        mime="application/zip",
+        key="planning_export_button",
+        width="stretch",
+        help=(
+            "Lädt eine ZIP-Datei herunter: je eine GPX-Datei pro Abschnitt "
+            "sowie eine weitere GPX-Datei mit den Unterteilungspunkten als "
+            "Wegpunkte."
+        ),
+    )
+
+
+def _render_map_and_profile(
+    df: pd.DataFrame,
+    planning_mode: bool = False,
+    track_store_seed: dict | None = None,
+) -> None:
     """
     Baut die Folium-Karte und das Plotly-Höhenprofil für die aktuell
     ausgewählten Tracks auf und rendert beide übereinander.
@@ -383,6 +704,17 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
     Wird aus render_map_page() heraus innerhalb der rechten Spalte
     aufgerufen (Kennzahlen links, Karte + Höhenprofil rechts daneben -
     siehe dortige Spaltenaufteilung).
+
+    'planning_mode' aktiviert die Unterteilung in Abschnitte per Mausklick
+    - im Höhenprofil ODER direkt auf der Karte (siehe _toggle_split_point,
+    _nearest_point_index) - sowie deren farbliche Hervorhebung auf Karte
+    und Höhenprofil; gilt nur sinnvoll, wenn 'df' genau einen Track enthält
+    (siehe render_map_page).
+
+    'track_store_seed' erlaubt es, ein im Planungsmodus bereits von
+    render_map_page() berechnetes Track-DataFrame hier wiederzuverwenden,
+    statt es (für denselben einzigen Track) ein zweites Mal über
+    process_track() zu berechnen.
     """
     # ----------------------------------------------------------------------
     # Wertebereiche für Kartenausschnitt und Farbskala
@@ -420,6 +752,13 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
         st.session_state.selected_point = None
     selected_point = st.session_state.selected_point
 
+    # Unterteilungspunkte je Track (track_id -> sortierte Liste von
+    # Punkt-Indizes), siehe _toggle_split_point. Wird defensiv auch hier
+    # initialisiert, obwohl render_map_page() das bereits zentral erledigt
+    # (siehe dort), damit diese Funktion auch unabhängig davon funktioniert.
+    if "split_points" not in st.session_state:
+        st.session_state.split_points = {}
+
     # Wenn sich die Sidebar-Filter geändert haben (andere/weniger/mehr
     # Tracks), verwerfen wir eine evtl. vorhandene Punkt-Auswahl. Zusätzlich
     # wird der interne Auswahl-Status des Plotly-Charts gelöscht: Ohne das
@@ -432,6 +771,8 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
     if filters_changed:
         selected_point = None
         st.session_state.selected_point = None
+        st.session_state["_last_planning_click"] = None
+        st.session_state["_last_planning_map_click"] = None
         if "my_chart_key" in st.session_state:
             del st.session_state["my_chart_key"]
 
@@ -494,16 +835,22 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
 
     # distance läuft über alle Tracks hinweg weiter (gemeinsame x-Achse im Profil)
     distance = 0
-    # track_id -> verarbeitetes DataFrame, für die Klick-Auflösung weiter unten
-    track_store = {}
+    # track_id -> verarbeitetes DataFrame, für die Klick-Auflösung weiter unten.
+    # Im Planungsmodus bereits von render_map_page() vorberechnete Einträge
+    # (siehe track_store_seed) werden übernommen, statt process_track() ein
+    # zweites Mal für denselben Track aufzurufen.
+    track_store = dict(track_store_seed) if track_store_seed else {}
 
     for i in range(0, len(df)):
 
         gpx_file = df["file_data"].iloc[i]
         track_id = df["track_id"].iloc[i]
 
-        # Gecachte, teure Verarbeitung (siehe functions.process_track)
-        gdf = process_track(track_id, gpx_file)
+        # Gecachte, teure Verarbeitung (siehe functions.process_track) -
+        # bzw. Wiederverwendung des vorberechneten Ergebnisses (s.o.).
+        gdf = track_store.get(track_id)
+        if gdf is None:
+            gdf = process_track(track_id, gpx_file)
 
         # Streckenlänge fortlaufend über alle Tracks hinweg aufsummieren,
         # damit im gemeinsamen Profil mehrere Tracks hintereinander auf der
@@ -512,6 +859,13 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
         distance = gdf["distance"].max()
 
         track_store[track_id] = gdf
+
+        # Unterteilungspunkte DIESES Tracks (Planungsmodus) - einmal hier
+        # ermittelt, weiter unten sowohl für die Marker auf der Karte als
+        # auch für die Hervorhebung im Höhenprofil verwendet.
+        track_splits = (
+            set(st.session_state.split_points.get(track_id, [])) if planning_mode else set()
+        )
 
         # --- Karte: Track einzeichnen ---------------------------------
         track_loc = gdf[["lat", "lon"]].values.tolist()
@@ -554,15 +908,48 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
             weight=5,
         ).add_to(m)
 
+        # Unterteilungspunkte (Planungsmodus) als eigene, orange Marker -
+        # dauerhaft sichtbar, im Gegensatz zum (gelben) zuletzt
+        # ausgewählten Punkt weiter unten, der nur den letzten Klick zeigt.
+        for n, split_idx in enumerate(sorted(track_splits), start=1):
+            if 0 <= split_idx < len(gdf):
+                srow = gdf.iloc[split_idx]
+                folium.CircleMarker(
+                    [srow["lat"], srow["lon"]],
+                    tooltip=f"Trennpunkt {n}",
+                    fill=True,
+                    fill_color="orange",
+                    radius=9,
+                    fill_opacity=0.9,
+                    stroke=True,
+                    color="white",
+                    weight=2,
+                ).add_to(m)
+
         # --- Profil: Track als Trace hinzufügen --------------------------
-        # Marker-Größe/-Umrandung normal, AUSSER am gerade ausgewählten
-        # Punkt: dort wird der Marker vergrößert und schwarz umrandet, um
-        # ihn im Profil optisch hervorzuheben.
+        # Marker-Größe/-Umrandung normal, AUSSER:
+        # - an gesetzten Unterteilungspunkten (Planungsmodus): orange
+        #   umrandet und etwas vergrößert, dauerhaft sichtbar (siehe
+        #   _toggle_split_point).
+        # - am gerade ausgewählten Punkt: zusätzlich vergrößert, um ihn
+        #   im Profil optisch hervorzuheben (Klick-Feedback, siehe Punkt 3
+        #   im Modul-Docstring oben).
         marker_sizes = np.full(len(gdf), 5)
         marker_line_widths = np.zeros(len(gdf))
+        marker_line_colors = np.full(len(gdf), "black", dtype=object)
+
+        for split_idx in track_splits:
+            if 0 <= split_idx < len(gdf):
+                marker_sizes[split_idx] = 14
+                marker_line_widths[split_idx] = 3
+                marker_line_colors[split_idx] = "orange"
+
         if selected_point is not None and selected_point["track_id"] == track_id:
-            marker_sizes[selected_point["point_index"]] = 20
-            marker_line_widths[selected_point["point_index"]] = 3
+            sel_idx = selected_point["point_index"]
+            marker_sizes[sel_idx] = 20
+            marker_line_widths[sel_idx] = 3
+            if sel_idx not in track_splits:
+                marker_line_colors[sel_idx] = "black"
 
         # Haupt-Trace: ein Punkt pro Trackpunkt, Farbe nach der gewählten
         # Spalte, mit Flächenfüllung bis zur x-Achse (Silhouette des
@@ -582,7 +969,7 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
                     cmin=range_att[0],
                     cmax=range_att[1],
                     size=marker_sizes,
-                    line=dict(color="black", width=marker_line_widths),
+                    line=dict(color=marker_line_colors.tolist(), width=marker_line_widths),
                 ),
                 fillgradient=dict(
                     type="vertical",
@@ -633,7 +1020,55 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
 
     folium.LayerControl().add_to(m)
     m.add_child(track_col)
-    st_folium(m, width="stretch", height=800)
+    # BEWUSST ohne 'key=': Ändert sich der Karteninhalt spürbar (z.B. beim
+    # Wechsel auf einen anderen Track), erzeugt streamlit-folium dadurch
+    # automatisch einen neuen internen Schlüssel, die Komponente wird neu
+    # gemountet und 'last_clicked' (s.u.) damit auf None zurückgesetzt. Mit
+    # einem FESTEN 'key' würde dagegen ein alter Kartenklick über einen
+    # Trackwechsel hinweg "hängen bleiben" und könnte fälschlich auf den
+    # NEUEN Track angewendet werden (siehe Klick-Auswertung weiter unten).
+    map_state = st_folium(m, width="stretch", height=800)
+
+    # ----------------------------------------------------------------------
+    # Klick auf der KARTE auswerten (Planungsmodus): der nächstgelegene
+    # Trackpunkt zum Klick wird ermittelt (siehe _nearest_point_index) und
+    # als Unterteilungspunkt umgeschaltet (siehe _toggle_split_point) -
+    # funktional dasselbe wie der Profil-Klick weiter unten, nur mit Klick
+    # auf der Karte statt im Höhenprofil als Auslöser. Da der Planungsmodus
+    # nur bei genau einem ausgewählten Track aktiv ist (siehe
+    # render_map_page), reicht hier der einzige Eintrag in track_store.
+    # ----------------------------------------------------------------------
+    if planning_mode and not filters_changed and map_state is not None:
+        last_clicked = map_state.get("last_clicked")
+        if last_clicked is not None:
+            click_track_id = df["track_id"].iloc[0]
+            gdf_for_click = track_store[click_track_id]
+            resolved_index = _nearest_point_index(
+                gdf_for_click, last_clicked["lat"], last_clicked["lng"]
+            )
+
+            # Eigener "zuletzt verarbeiteter Klick"-Schutz, analog zu
+            # '_last_planning_click' beim Profil-Klick weiter unten, aber
+            # unabhängig davon geführt: st_folium liefert denselben
+            # 'last_clicked'-Wert über mehrere Reruns hinweg zurück, bis
+            # ein NEUER Kartenklick erfolgt - ohne diesen Schutz würde der
+            # Punkt bei jedem Rerun erneut umgeschaltet.
+            click_token = (
+                click_track_id,
+                round(last_clicked["lat"], 7),
+                round(last_clicked["lng"], 7),
+            )
+            if st.session_state.get("_last_planning_map_click") != click_token:
+                st.session_state["_last_planning_map_click"] = click_token
+                if _toggle_split_point(click_track_id, resolved_index, len(gdf_for_click)):
+                    row = gdf_for_click.iloc[resolved_index]
+                    st.session_state.selected_point = {
+                        "track_id": click_track_id,
+                        "point_index": int(resolved_index),
+                        "lat": float(row["lat"]),
+                        "lon": float(row["lon"]),
+                    }
+                    st.rerun()
 
     fig.update_layout(
         xaxis_fixedrange=True,
@@ -685,11 +1120,28 @@ def _render_map_and_profile(df: pd.DataFrame) -> None:
                 "lon": float(row["lon"]),
             }
 
+            if planning_mode:
+                # Im Planungsmodus zählt JEDER neue Klick als Umschalt-
+                # Aktion für einen Unterteilungspunkt (siehe
+                # _toggle_split_point) - AUCH ein wiederholter Klick auf
+                # denselben Punkt, um ihn wieder zu entfernen. Der normale
+                # Endlosschleifen-Schutz unten (Vergleich mit
+                # selected_point) würde das verhindern, da ein erneuter
+                # Klick auf denselben Punkt ja dieselbe new_selection
+                # ergäbe - daher hier ein eigener, von selected_point
+                # unabhängiger Schutz anhand des zuletzt verarbeiteten
+                # Klicks.
+                click_token = (clicked_track_id, resolved_index)
+                if st.session_state.get("_last_planning_click") != click_token:
+                    st.session_state["_last_planning_click"] = click_token
+                    if _toggle_split_point(clicked_track_id, resolved_index, len(gdf_clicked)):
+                        st.session_state.selected_point = new_selection
+                        st.rerun()
             # Nur wenn sich die Auswahl tatsächlich geändert hat einen
             # weiteren Rerun auslösen - verhindert eine Endlosschleife,
             # falls derselbe Klick (z.B. aus dem Chart-Status) erneut
             # ausgewertet wird.
-            if new_selection != st.session_state.selected_point:
+            elif new_selection != st.session_state.selected_point:
                 st.session_state.selected_point = new_selection
                 st.rerun()
 
@@ -797,10 +1249,49 @@ def render_map_page() -> None:
             st.stop()
         meta = meta[meta["track_id"].isin(selected_tracks)]
 
+        # ------------------------------------------------------------------
+        # Planungsmodus (Tourenplanung): nur aktivierbar bei GENAU einem
+        # ausgewählten Track, da sich nur ein einzelner Track sinnvoll in
+        # Abschnitte unterteilen lässt (siehe Modul-Docstring, Punkt 4).
+        # Fällt die Bedingung weg (z.B. weitere Tracks dazu ausgewählt,
+        # während der Modus bereits aktiv war), wird er automatisch wieder
+        # deaktiviert, statt nur das Steuerelement zu sperren.
+        # ------------------------------------------------------------------
+        st.divider()
+        single_track_selected = len(selected_tracks) == 1
+        if not single_track_selected:
+            st.session_state.planning_mode = False
+        st.toggle(
+            "📐 Planung",
+            key="planning_mode",
+            disabled=not single_track_selected,
+            help=(
+                "Im Planungsmodus lässt sich der ausgewählte Track per "
+                "Klick auf die Karte oder ins Höhenprofil in Abschnitte "
+                "unterteilen. Dafür muss genau ein Track ausgewählt sein."
+            ),
+        )
+
     # Erst JETZT, nachdem feststeht welche Tracks tatsächlich gebraucht
     # werden, die zugehörigen (potenziell großen) GPX-Binärdaten nachladen.
     file_data = load_track_files(tuple(sorted(meta["track_id"].tolist())))
     df = meta.merge(file_data, on="track_id", how="inner")
+
+    # planning_mode kann (s.o.) zwar nur bei genau einem ausgewählten Track
+    # aktiviert werden, "len(df) == 1" wird hier trotzdem defensiv erneut
+    # geprüft, falls sich die Auswahl zwischen Sidebar und diesem Punkt
+    # noch ändern sollte.
+    planning_active = bool(st.session_state.get("planning_mode")) and len(df) == 1
+
+    # Im Planungsmodus wird der (einzige) Track HIER schon einmal
+    # verarbeitet und sowohl an die Kennzahlen-Spalte als auch an
+    # _render_map_and_profile() weitergereicht, damit process_track()
+    # nicht zweimal pro Seitenaufruf für denselben Track läuft (siehe
+    # _render_map_and_profile, Parameter 'track_store_seed').
+    precomputed_track_store = None
+    if planning_active:
+        track_id = df["track_id"].iloc[0]
+        precomputed_track_store = {track_id: process_track(track_id, df["file_data"].iloc[0])}
 
     # ----------------------------------------------------------------------
     # Hauptbereich: Kennzahlen links, Karte + Höhenprofil rechts daneben
@@ -809,11 +1300,25 @@ def render_map_page() -> None:
 
     with col_kpis:
         with st.container(border=True):
-            _render_kpis(df)
+            if planning_active:
+                track_id = df["track_id"].iloc[0]
+                _render_planning_kpis(
+                    precomputed_track_store[track_id], track_id, df["track_title"].iloc[0]
+                )
+            else:
+                _render_kpis(df)
 
     with col_map:
         with st.container(border=True):
-            _render_map_and_profile(df)
+            if planning_active:
+                st.caption(
+                    "📐 Planungsmodus: Klicke auf die Karte oder ins Höhenprofil, um "
+                    "Unterteilungspunkte zu setzen - ein erneuter Klick auf einen "
+                    "bestehenden Punkt entfernt ihn wieder."
+                )
+            _render_map_and_profile(
+                df, planning_mode=planning_active, track_store_seed=precomputed_track_store
+            )
 
 
 # Direkter Start zu Debug-Zwecken: `streamlit run map.py`. Im Normalbetrieb

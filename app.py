@@ -32,7 +32,45 @@ st.set_page_config(
     page_title="MyTrack",
     page_icon="🗺️",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# Reduziert Streamlits eigene Innenabstände/Lücken, um möglichst viel Platz
+# für den eigentlichen Inhalt zu lassen - insbesondere am oberen
+# Bildschirmrand. Ergänzt .streamlit/config.toml (dort wird die obere
+# Symbolleiste bereits größtenteils per Konfiguration ausgeblendet) um den
+# Teil, der echtes CSS statt TOML-Konfiguration braucht:
+#   - .stAppHeader vollständig entfernen (Höhe 0 statt nur ausgeblendeter
+#     Inhalte), damit kein leerer Streifen oben übrig bleibt.
+#   - .stMainBlockContainer ohne den dafür sonst reservierten Innenabstand.
+#   - .stVerticalBlock (Lücke zwischen übereinanderliegenden Elementen) auf
+#     0 reduziert.
+# Betrifft global beide Seiten (Karte/Verwaltung), da dieser Codeblock vor
+# der Navigation läuft und somit bei jedem Seitenaufruf ausgeführt wird.
+st.markdown(
+    """
+    <style>
+    .stAppHeader {
+        display: none;
+    }
+    .stMainBlockContainer {
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    .stVerticalBlock {
+        gap: 0px !important;
+    }
+    
+    [data-testid="collapsedControl"] { display: none }
+
+    </style>
+
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # Titel + kurze Erklärung oben in der Seitenleiste - wird unabhängig von der
 # gewählten Seite (Karte/Verwaltung) immer angezeigt.

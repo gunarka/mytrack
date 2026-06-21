@@ -1,0 +1,23 @@
+# .streamlit/config.toml
+#
+# Reduziert Streamlits eigene Oberfläche auf ein Minimum, damit möglichst
+# viel Platz für den eigentlichen App-Inhalt bleibt - insbesondere am
+# oberen Bildschirmrand.
+#
+# Hinweis: Die hier zuvor zusätzlich eingetragenen CSS-Regeln (Innenabstände
+# / Lücken auf 0 setzen) gehörten NICHT in diese Datei - TOML ist reine
+# Konfiguration, kein CSS, dadurch war diese Datei bisher ungültig und
+# wurde von Streamlit komplett ignoriert (Fallback auf Standardwerte). Die
+# CSS-Anpassungen sitzen jetzt stattdessen als echtes <style>, per
+# st.markdown() eingebunden, in app.py (siehe dort).
+
+[client]
+# "minimal": Entwickler-Optionen (Deploy, Rerun, Cache leeren, ...) im Menü
+# oben rechts ausblenden.
+toolbarMode = "minimal"
+
+[ui]
+# Blendet die meisten Streamlit-eigenen UI-Elemente am oberen Rand der App
+# aus. Blendet laut Streamlit-Doku NICHT das Menü oben rechts aus - das
+# wird oben bereits per toolbarMode geregelt.
+hideTopBar = true
