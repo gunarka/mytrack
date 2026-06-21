@@ -1117,11 +1117,11 @@ def _render_map_and_profile(
     m.add_child(track_col)
     folium.LayerControl().add_to(m)
     folium.plugins.Fullscreen(
-    position="topleft",
-    title="Expand me",
-    title_cancel="Exit me",
-    force_separate_button=True,
-    ).add_to(m)
+        position="topleft",
+        title="Expand me",
+        title_cancel="Exit me",
+        force_separate_button=True,
+        ).add_to(m)
     
     # BEWUSST ohne 'key=': Ändert sich der Karteninhalt spürbar (z.B. beim
     # Wechsel auf einen anderen Track), erzeugt streamlit-folium dadurch
