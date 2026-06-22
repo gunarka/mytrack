@@ -1,6 +1,7 @@
 # Web-UI
 streamlit
 streamlit_folium
+streamlit-javascript
 
 # Datenhaltung
 duckdb

@@ -13,7 +13,10 @@ Sie übernimmt drei Aufgaben:
        werden, daher steht sie hier statt in map.py/admin.py.
     2. Titel und Beschreibung in der Seitenleiste, sichtbar auf jeder Seite.
     3. Seitenleisten-Navigation, über die zwischen "Karte" (map.py) und
-       "Verwaltung" (admin.py) gewechselt werden kann.
+       "Verwaltung" (admin.py) gewechselt werden kann - zusammen mit den
+       Anzeigeeinstellungen der Kartenseite (Farbauswahl, Spaltenbreite,
+       Höhe von Karte/Profil) in einem gemeinsamen, einklappbaren Bereich
+       der Seitenleiste (siehe 'settings_expander' weiter unten).
 
 admin.py und map.py enthalten dazu jeweils eine render_*_page()-Funktion
 mit dem kompletten Seiteninhalt; app.py registriert diese Funktionen nur
@@ -21,6 +24,8 @@ noch als Streamlit-"Pages" und ruft die ausgewählte Seite auf. Die
 eigentliche fachliche Logik (Datenbank, GPX-Verarbeitung, Geocoding) liegt
 gebündelt in functions.py.
 """
+
+import functools
 
 import streamlit as st
 
@@ -35,18 +40,31 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Reduziert Streamlits eigene Innenabstände/Lücken, um möglichst viel Platz
-# für den eigentlichen Inhalt zu lassen - insbesondere am oberen
-# Bildschirmrand. Ergänzt .streamlit/config.toml (dort wird die obere
-# Symbolleiste bereits größtenteils per Konfiguration ausgeblendet) um den
-# Teil, der echtes CSS statt TOML-Konfiguration braucht:
-#   - .stAppHeader vollständig entfernen (Höhe 0 statt nur ausgeblendeter
-#     Inhalte), damit kein leerer Streifen oben übrig bleibt.
-#   - .stMainBlockContainer ohne den dafür sonst reservierten Innenabstand.
-#   - .stVerticalBlock (Lücke zwischen übereinanderliegenden Elementen) auf
-#     0 reduziert.
-# Betrifft global beide Seiten (Karte/Verwaltung), da dieser Codeblock vor
-# der Navigation läuft und somit bei jedem Seitenaufruf ausgeführt wird.
+# Globales CSS-Styling - gilt auf beiden Seiten (Karte/Verwaltung), da dieser
+# Block vor der Navigation ausgeführt wird:
+#
+#   .stAppHeader          — obere App-Leiste komplett entfernen (kein leerer
+#                           Streifen am oberen Rand des Hauptinhalts).
+#   .stMainBlockContainer — Innenabstand des Hauptinhaltsbereichs reduzieren.
+#   .stVerticalBlock      — Lücke zwischen übereinanderliegenden Elementen
+#                           auf 0 setzen.
+#
+#   Seitenleiste — kein Einklapp-Button, kein Leerraum oben:
+#   [stSidebarHeader]       enthält ausschliesslich den Einklapp-Button und
+#                           einen leeren Logo-Platzhalter. Wird komplett
+#                           ausgeblendet → der Nutzerinhalt beginnt direkt
+#                           am oberen Rand der Seitenleiste (y=0).
+#   [stSidebarCollapseButton] explizit versteckt (Streamlit ≥ 1.38 benennt
+#                           das Element so; ältere Versionen nutzten
+#                           [collapsedControl] - beide Regeln koexistieren
+#                           harmlos).
+#   [collapsedControl]      Hamburger-Icon im Hauptinhalt (erscheint wenn
+#                           die Seitenleiste eingeklappt wäre) ebenfalls
+#                           versteckt - da die Seitenleiste permanent offen
+#                           bleibt, wird dieser Button nie gebraucht.
+#
+#   [stSidebar]             Breite auf 360 px erhöht (Standard: 300 px),
+#                           damit Filter und Einstellungen mehr Platz haben.
 st.markdown(
     """
     <style>
@@ -62,11 +80,22 @@ st.markdown(
     .stVerticalBlock {
         gap: 0px !important;
     }
-    
-    [data-testid="collapsedControl"] { display: none }
 
+    [data-testid="stSidebarHeader"] {
+        display: none;
+    }
+    [data-testid="stSidebarCollapseButton"] {
+        display: none;
+    }
+    [data-testid="collapsedControl"] {
+        display: none;
+    }
+
+    [data-testid="stSidebar"] {
+        min-width: 360px;
+        max-width: 360px;
+    }
     </style>
-
     """,
     unsafe_allow_html=True,
 )
@@ -79,13 +108,35 @@ with st.sidebar:
     #st.caption("Aufgezeichnete Touren ansehen und verwalten")
     st.divider()
 
-# st.navigation erzeugt automatisch ein Auswahlmenü in der Seitenleiste und
-# führt beim Wechseln der Seite die jeweils hinterlegte render_*_page()-
-# Funktion aus. default=True legt fest, welche Seite beim ersten Aufruf der
-# App gezeigt wird.
+    # Gemeinsamer, einklappbarer Seitenleisten-Bereich für:
+    #   - die Seiten-Navigation (Karte/Verwaltung, siehe weiter unten -
+    #     st.navigation() selbst wird dafür mit position="hidden" *nicht*
+    #     dargestellt, stattdessen bauen wir die Menüpunkte manuell per
+    #     st.page_link() hier hinein),
+    #   - sowie (nur auf der Kartenseite) die Anzeigeeinstellungen Farbe,
+    #     Spaltenbreite und Höhe von Karte/Profil (werden von
+    #     render_map_page() über das Argument 'settings_container'
+    #     hineingerendert, siehe map.py).
+    # Als EIN Container-Objekt angelegt (statt zweimal mit demselben Label
+    # aufgerufen), damit alle genannten Elemente in genau demselben
+    # auf-/zuklappbaren Bereich landen, auch wenn sie aus unterschiedlichen
+    # Modulen/Funktionen heraus befüllt werden.
+    settings_expander = st.expander("⚙️ Einstellungen", expanded=True)
+
+# st.navigation deklariert die verfügbaren Seiten und übernimmt das Routing
+# (welche render_*_page()-Funktion beim Seitenwechsel läuft); mit
+# position="hidden" wird dabei aber NICHT automatisch ein Menü in der
+# Seitenleiste gezeichnet - das übernehmen wir stattdessen selbst weiter
+# unten per st.page_link(), damit es im selben einklappbaren Bereich wie
+# die Anzeigeeinstellungen landet (siehe 'settings_expander' oben).
+# functools.partial reicht 'settings_expander' an render_map_page() durch,
+# ohne dass st.navigation()/st.Page() etwas davon wissen müssen - beide
+# erwarten weiterhin nur eine ohne Argumente aufrufbare Funktion.
+# default=True legt fest, welche Seite beim ersten Aufruf der App gezeigt
+# wird.
 pages = [
     st.Page(
-        render_map_page,
+        functools.partial(render_map_page, settings_container=settings_expander),
         title="Karte",
         icon="🗺️",
         url_path="karte",
@@ -99,5 +150,12 @@ pages = [
     ),
 ]
 
-navigation = st.navigation(pages, position="sidebar")
+navigation = st.navigation(pages, position="hidden")
+
+with settings_expander:
+    st.caption("Navigation")
+    for page in pages:
+        st.page_link(page)
+    st.divider()
+
 navigation.run()

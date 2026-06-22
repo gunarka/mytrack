@@ -53,6 +53,7 @@ einfachen Klick im Profil), wird diese Verarbeitung über st.cache_data
 gecacht - siehe process_track() in functions.py.
 """
 
+import hashlib  # Stabile Track-Signatur für den st_folium-Key (kein Python-hash(), da PYTHONHASHSEED)
 import io  # ZIP-Export im Planungsmodus (in-memory statt temporärer Dateien)
 import zipfile  # ZIP-Export im Planungsmodus
 
@@ -65,6 +66,7 @@ import pandas as pd
 import plotly.graph_objects as go  # Höhenprofil-Diagramm
 import streamlit as st  # Web-UI-Framework
 from streamlit_folium import st_folium  # Rendert eine Folium-Karte in Streamlit
+from streamlit_javascript import st_javascript  # Liest window.parent.innerHeight im Browser aus
 
 from functions import (
     DEFAULT_MIN_ELEVATION_CHANGE_M,
@@ -80,6 +82,81 @@ from functions import (
 # @st.cache_resource) - admin.py nutzt über denselben Aufruf dieselbe
 # Verbindung.
 con = get_connection()
+
+
+# --------------------------------------------------------------------------
+# Höhe von Karte + Höhenprofil
+# --------------------------------------------------------------------------
+# Bisheriger Fixwert war Karte=800px + Profil=300px (insgesamt 1100px) - das
+# bleibt der Standard-/Fallback-Wert, u.a. solange die tatsächliche
+# Fensterhöhe (im Modus "Fensterhöhe") noch nicht vom Browser ermittelt
+# wurde (siehe _resolve_map_profile_height).
+_DEFAULT_TOTAL_HEIGHT_PX = 1100
+_MAX_TOTAL_HEIGHT_PX = 2200
+_MIN_MAP_HEIGHT_PX = 300
+_MIN_PROFILE_HEIGHT_PX = 150
+# Anteil des Höhenprofils an der Gesamthöhe, entspricht ungefähr dem
+# bisherigen festen Verhältnis 300/1100.
+_PROFILE_HEIGHT_RATIO = 300 / 1100
+# Abzug von der per JavaScript ermittelten Fensterhöhe (window.innerHeight)
+# für Bereiche außerhalb des Karte/Profil-Containers: oberer/unterer
+# Innenabstand der Seite, Rahmen des Containers, ggf. Planungsmodus-Hinweis.
+_WINDOW_HEIGHT_OFFSET_PX = 220
+
+
+def _split_map_profile_height(total_height_px: int) -> tuple[int, int]:
+    """
+    Teilt eine Gesamthöhe in Karten- und Profilhöhe auf (siehe
+    _PROFILE_HEIGHT_RATIO), unter Einhaltung von Mindesthöhen je Element.
+    """
+    total_height_px = max(total_height_px, _MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX)
+    profile_height_px = max(_MIN_PROFILE_HEIGHT_PX, round(total_height_px * _PROFILE_HEIGHT_RATIO))
+    map_height_px = max(_MIN_MAP_HEIGHT_PX, total_height_px - profile_height_px)
+    return map_height_px, profile_height_px
+
+
+def _resolve_map_profile_height() -> tuple[int, int]:
+    """
+    Ermittelt die aktuell zu verwendende Höhe für Karte + Höhenprofil als
+    (map_height_px, profile_height_px) - entweder automatisch aus der
+    Fensterhöhe des Browsers oder über den manuell gesetzten Schieberegler
+    (siehe Auswahl 'map_profile_height_mode' in der Seitenleiste).
+
+    Im Automatik-Modus wird per st_javascript() der Wert von
+    window.parent.innerHeight aus dem Browser geholt.
+
+    Wichtig: 'window.innerHeight' würde die Höhe des eigenen
+    Komponenten-Iframes zurückliefern (die immer 0 ist), nicht die
+    des Browser-Fensters. 'window.parent.innerHeight' greift dagegen auf das
+    Elternfenster zu - das funktioniert, weil Streamlits Custom-Components-
+    Iframes das Sandbox-Attribut 'allow-same-origin' tragen und damit
+    same-origin-Zugriff auf window.parent haben.
+
+    Die Komponente wertet das JS beim ersten Einbetten aus und löst dann
+    einen Rerun aus - beim allerersten Aufruf (bevor das JS ausgewertet
+    wurde) liefert sie 0 zurück und die Karte erscheint zunächst in der
+    Standard-Höhe (_DEFAULT_TOTAL_HEIGHT_PX). Ab dem zweiten Rerun steht
+    der echte Wert zur Verfügung.
+
+    Nach einer Browser-Fenster-Grössenänderung wird der Wert beim nächsten
+    Rerun (z.B. durch eine Nutzerinteraktion) aktualisiert, da st_javascript
+    die Auswertung bei jeder neuen Komponentenmontierung wiederholt.
+    Für eine regelmässige Aktualisierung kann der Schieberegler 'Höhe Karte
+    + Profil' auf 'Manuell' umgeschaltet werden.
+    """
+    if st.session_state.get("map_profile_height_mode") == "manual":
+        total_height_px = st.session_state.get("map_profile_total_height_px", _DEFAULT_TOTAL_HEIGHT_PX)
+        return _split_map_profile_height(total_height_px)
+
+    # window.parent.innerHeight = Höhe des Browser-Viewports (nicht des Iframes)
+    window_height = st_javascript("window.parent.innerHeight", key="window_height_js")
+    min_plausible = _MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX + _WINDOW_HEIGHT_OFFSET_PX
+    if isinstance(window_height, (int, float)) and window_height >= min_plausible:
+        total_height_px = int(window_height) - _WINDOW_HEIGHT_OFFSET_PX
+    else:
+        total_height_px = _DEFAULT_TOTAL_HEIGHT_PX
+    total_height_px = min(total_height_px, _MAX_TOTAL_HEIGHT_PX)
+    return _split_map_profile_height(total_height_px)
 
 
 # --------------------------------------------------------------------------
@@ -418,15 +495,13 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
     wiederzuverwenden: _render_planning_kpis() übergibt dort ein DataFrame
     mit denselben Spalten, aber einer Zeile je Teil (statt je Track)
     und einer entsprechend angepassten Überschrift - siehe dort.
+
+    Der Schieberegler für die Spaltenbreite ('kpi_col_width_pct') wird NICHT
+    mehr hier gerendert, sondern zusammen mit den anderen
+    Anzeigeeinstellungen im aufklappbaren Bereich der Seitenleiste (siehe
+    render_map_page) - der hier verwendete Wert kommt also von dort.
     """
     st.subheader(subheader)
-    st.slider(
-        "Breite anpassen",
-        min_value=10,
-        max_value=35,
-        key="kpi_col_width_pct",
-        help="Breite dieser Spalte gegenüber der Karte rechts daneben.",
-    )
 
     descent_abs = df["track_descent_m"].abs()
 
@@ -743,6 +818,8 @@ def _render_map_and_profile(
     df: pd.DataFrame,
     planning_mode: bool = False,
     track_store_seed: dict | None = None,
+    map_height: int = 800,
+    profile_height: int = 300,
 ) -> None:
     """
     Baut die Folium-Karte und das Plotly-Höhenprofil für die aktuell
@@ -762,6 +839,12 @@ def _render_map_and_profile(
     render_map_page() berechnetes Track-DataFrame hier wiederzuverwenden,
     statt es (für denselben einzigen Track) ein zweites Mal über
     process_track() zu berechnen.
+
+    'map_height'/'profile_height' (in Pixeln) bestimmen die Höhe der
+    Folium-Karte bzw. des Plotly-Höhenprofils - von render_map_page() über
+    _resolve_map_profile_height() ermittelt (entweder automatisch aus der
+    Fensterhöhe oder über den manuellen Schieberegler in der Seitenleiste,
+    siehe dort).
     """
     # ----------------------------------------------------------------------
     # Wertebereiche für Kartenausschnitt und Farbskala
@@ -1123,14 +1206,36 @@ def _render_map_and_profile(
         force_separate_button=True,
         ).add_to(m)
     
-    # BEWUSST ohne 'key=': Ändert sich der Karteninhalt spürbar (z.B. beim
-    # Wechsel auf einen anderen Track), erzeugt streamlit-folium dadurch
-    # automatisch einen neuen internen Schlüssel, die Komponente wird neu
-    # gemountet und 'last_clicked' (s.u.) damit auf None zurückgesetzt. Mit
-    # einem FESTEN 'key' würde dagegen ein alter Kartenklick über einen
-    # Trackwechsel hinweg "hängen bleiben" und könnte fälschlich auf den
-    # NEUEN Track angewendet werden (siehe Klick-Auswertung weiter unten).
-    map_state = st_folium(m, width="stretch", height=800)
+    # Key für st_folium: enkodiert sowohl die aktuelle Track-Auswahl als auch
+    # die gewünschte Kartenhöhe.
+    #
+    # Warum ein expliziter Key nötig ist:
+    # st_folium rendert eine Leaflet-Karte in einem iframe. Streamlit-
+    # Komponenten aktualisieren ihre innere Darstellung in zwei Wegen:
+    #   (a) Props-Update (kein Remount): die Komponente erhält neue Props und
+    #       entscheidet selbst, ob/wie sie sie umsetzt.
+    #   (b) Remount (key wechselt): der bisherige iframe wird entfernt und ein
+    #       völlig neuer aufgebaut.
+    #
+    # streamlit_folium ignoriert leider die 'height'-Prop beim Props-Update -
+    # der Leaflet-Container behält seine ursprüngliche Höhe. Ein Remount ist
+    # also zwingend, damit die neue Höhe wirksam wird.
+    #
+    # Key-Strategie:
+    #   track_sig  - MD5 der sortierten Track-IDs; ändert sich bei
+    #                Trackwechsel → Remount → last_clicked zurückgesetzt ✓
+    #   map_height - Pixelhöhe; ändert sich bei Slider/Auto-Anpassung →
+    #                Remount → iframe erhält korrekte neue Höhe ✓
+    #   Gleiche Tracks + gleiche Höhe → gleicher Key → kein Remount →
+    #   Kartenposition/Zoom und last_clicked bleiben erhalten ✓
+    #
+    # (vorher kein expliziter Key: streamlit_folium nutzte dann einen
+    # internen Hash des Folium-Map-Objekts - was bei Trackwechseln korrekt
+    # remountete, aber bei reinen Höhenänderungen keinen neuen Hash erzeugte
+    # und deshalb nie remountete.)
+    _track_sig = hashlib.md5(str(current_track_ids).encode()).hexdigest()[:8]
+    _fmap_key = f"fmap_{_track_sig}_{map_height}"
+    map_state = st_folium(m, width="stretch", height=map_height, key=_fmap_key)
 
     # ----------------------------------------------------------------------
     # Klick auf der KARTE auswerten (Planungsmodus): der nächstgelegene
@@ -1182,7 +1287,7 @@ def _render_map_and_profile(
     # on_select="rerun": ein Klick im Profil löst einen kompletten
     # Skript-Rerun aus; "event" enthält danach die Klick-Information
     # (welche Trace, welcher Punkt) für DIESEN Durchlauf.
-    event = st.plotly_chart(fig, on_select="rerun", key="my_chart_key", height=300)
+    event = st.plotly_chart(fig, on_select="rerun", key="my_chart_key", height=profile_height)
 
     # ----------------------------------------------------------------------
     # Klick im Profil auswerten und Auswahl in den Session State legen
@@ -1250,13 +1355,34 @@ def _render_map_and_profile(
                 st.rerun()
 
 
-def render_map_page() -> None:
-    """Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil)."""
+def render_map_page(settings_container=None) -> None:
+    """
+    Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil).
+
+    'settings_container' ist ein Streamlit-Container (typischerweise ein
+    st.expander), in den die Anzeigeeinstellungen - Farbauswahl für
+    Karte/Profil, Spaltenbreite der Kennzahlen-Box sowie Höhe von
+    Karte/Profil - gerendert werden. Im Normalbetrieb übergibt app.py
+    hierfür denselben aufklappbaren Seitenleisten-Bereich, der dort auch
+    die Seiten-Navigation (Karte/Verwaltung) enthält - dadurch landen
+    Navigation UND Anzeigeeinstellungen gemeinsam in einem einzigen
+    einklappbaren Container. Beim direkten Debug-Start
+    (`streamlit run map.py`, siehe Dateiende) gibt es dieses app.py nicht,
+    daher wird in diesem Fall ein eigener Expander angelegt.
+    """
+    if settings_container is None:
+        v = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
 
     # ----------------------------------------------------------------------
-    # Sidebar: Filter
+    # Aufklappbarer Seitenleisten-Bereich: Anzeigeeinstellungen
     # ----------------------------------------------------------------------
-    with st.sidebar:
+    # Enthält (zusammen mit der Navigation aus app.py): Farbauswahl für
+    # Karte/Höhenprofil, Spaltenbreite der Kennzahlen-Box sowie die Höhe von
+    # Karte + Höhenprofil (automatisch an die Fensterhöhe angepasst oder
+    # manuell per Schieberegler) - bewusst von den darunter folgenden
+    # Filtern (Sport/Land/Jahr/Jahreszeit, Track-Auswahl) getrennt, damit
+    # diese immer sofort sichtbar bleiben.
+    with settings_container:
         color_options = {
             "ele": "Höhe",
             "km_per_h": "Geschwindigkeit",
@@ -1270,6 +1396,45 @@ def render_map_page() -> None:
             format_func=lambda x: color_options[x],
         )
 
+        st.slider(
+            "Spaltenbreite Kennzahlen",
+            min_value=10,
+            max_value=35,
+            value=15,
+            key="kpi_col_width_pct",
+            help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
+        )
+
+        st.radio(
+            "Höhe Karte + Profil",
+            options=["window", "manual"],
+            index=0,
+            key="map_profile_height_mode",
+            format_func=lambda x: "An Fensterhöhe anpassen" if x == "window" else "Manuell",
+            help=(
+                "'An Fensterhöhe anpassen' liest beim ersten Laden die "
+                "tatsächliche Browser-Fensterhöhe per JavaScript aus "
+                "(window.parent.innerHeight) und passt Karte + Profil "
+                "entsprechend an. Nach einer Fenster-Grössenänderung wird "
+                "der Wert beim nächsten Rerun aktualisiert. "
+                "Für eine sofortige, feste Höhe: 'Manuell' wählen."
+            ),
+        )
+        if st.session_state.map_profile_height_mode == "manual":
+            st.slider(
+                "Höhe Karte + Profil (px)",
+                min_value=_MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX,
+                max_value=_MAX_TOTAL_HEIGHT_PX,
+                step=100,
+                value=_DEFAULT_TOTAL_HEIGHT_PX,
+                key="map_profile_total_height_px",
+                help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
+            )
+
+    # ----------------------------------------------------------------------
+    # Sidebar: Filter
+    # ----------------------------------------------------------------------
+    with st.sidebar:
         meta = load_metadata()
 
         if meta["track_id"].dropna().empty:
@@ -1400,19 +1565,18 @@ def render_map_page() -> None:
     # ----------------------------------------------------------------------
     # Hauptbereich: Kennzahlen links, Karte + Höhenprofil rechts daneben
     # ----------------------------------------------------------------------
-    # Die Breite der linken Spalte (in Prozent) lässt sich über einen
-    # Schieberegler INNERHALB dieser Spalte einstellen (siehe _render_kpis,
-    # direkt unter der Überschrift "Kennzahlen") - st.columns() braucht die
-    # Breiten aber bereits HIER, bevor der Spalteninhalt (und damit der
-    # Schieberegler selbst) gerendert wird. Daher zunächst der zuletzt
-    # gespeicherte Wert aus session_state (mit Default beim allerersten
-    # Aufruf); der Schieberegler aktualisiert denselben Schlüssel weiter
-    # unten und wirkt damit ab dem NÄCHSTEN Rerun (das Verschieben des
-    # Reglers selbst löst bereits einen Rerun aus).
-    if "kpi_col_width_pct" not in st.session_state:
-        st.session_state.kpi_col_width_pct = 15
+    # Die Breite der linken Spalte (in Prozent) kommt aus dem Schieberegler
+    # "Spaltenbreite Kennzahlen" im Anzeigeeinstellungen-Bereich der
+    # Seitenleiste (siehe weiter oben in dieser Funktion) - der liegt im
+    # Skriptablauf bereits VOR dieser Stelle, der Wert in session_state ist
+    # also bereits aktuell.
     kpi_width_pct = st.session_state.kpi_col_width_pct
     col_kpis, col_map = st.columns([kpi_width_pct, 100 - kpi_width_pct], gap="small")
+
+    # Höhe von Karte + Höhenprofil: automatisch aus der Fensterhöhe oder
+    # manuell per Schieberegler (siehe _resolve_map_profile_height sowie die
+    # zugehörige Auswahl im Anzeigeeinstellungen-Bereich der Seitenleiste).
+    map_height, profile_height = _resolve_map_profile_height()
 
     with col_kpis:
         with st.container(border=True):
@@ -1433,7 +1597,11 @@ def render_map_page() -> None:
                     "bestehenden Punkt entfernt ihn wieder."
                 )
             _render_map_and_profile(
-                df, planning_mode=planning_active, track_store_seed=precomputed_track_store
+                df,
+                planning_mode=planning_active,
+                track_store_seed=precomputed_track_store,
+                map_height=map_height,
+                profile_height=profile_height,
             )
 
 
