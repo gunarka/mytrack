@@ -5,6 +5,9 @@ von GPX-Tracks (Wandern, Laufen, Radfahren, ...). Tracks lassen sich zu
 **Touren** und **Sportarten** zusammenfassen, auf einer Karte mit
 Höhenprofil ansehen und in einer Verwaltungsoberfläche pflegen.
 
+Entwicklungssicht (Architekturregeln, Konventionen, Fallstricke):
+[CONTEXT.md](CONTEXT.md).
+
 ## Architektur
 
 Die App ist in sechs Python-Dateien aufgeteilt:
@@ -22,7 +25,7 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 `render_map_page()`, `render_stats_page()` bzw. `render_admin_page()`
 bereit. `app.py` registriert diese über
 [`st.navigation`](https://docs.streamlit.io/develop/api-reference/navigation/st.navigation)
-als Seiten und kümmert sich um die gemeinsame Seitenleiste. Beide Dateien
+als Seiten und kümmert sich um die gemeinsame Seitenleiste. Diese Dateien
 lassen sich zum Debuggen weiterhin auch einzeln starten
 (`streamlit run admin.py` / `streamlit run map.py` /
 `streamlit run stats.py`).
