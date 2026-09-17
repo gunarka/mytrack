@@ -83,23 +83,28 @@ def _render_track_create_form() -> None:
         title = track_title or gpx_file.name
         # Reverse-Geocoding + Zeitzonen-Ermittlung brauchen einen Moment -
         # daher ein sichtbarer Spinner, statt dass die Seite scheinbar
-        # "einfriert".
-        with st.spinner(f"Verarbeite '{gpx_file.name}' …"):
-            record = process_and_build_track(
-                file_name=gpx_file.name,
-                file_bytes=gpx_file.getvalue(),
-                track_title=title,
-                sport_id=sport[0],
-                tour_id=tour[0],
-            )
-            insert_track(record)
+        # "einfriert". Schlägt das Einlesen fehl (z.B. GPX ohne Trackpunkte
+        # oder beschädigte Datei), wird eine verständliche Meldung
+        # angezeigt statt eines Python-Fehlers mitten in der Oberfläche.
+        try:
+            with st.spinner(f"Verarbeite '{gpx_file.name}' …"):
+                record = process_and_build_track(
+                    file_name=gpx_file.name,
+                    file_bytes=gpx_file.getvalue(),
+                    track_title=title,
+                    sport_id=sport[0],
+                    tour_id=tour[0],
+                )
+                insert_track(record)
+        except Exception as error:
+            st.error(f"'{gpx_file.name}' konnte nicht verarbeitet werden: {error}")
+            return
         st.success(f"Track '{title}' gespeichert.")
         st.rerun()
 
 
-def _render_track_edit_form() -> None:
+def _render_track_edit_form(tracks_df) -> None:
     """Formular: Titel/Sport/Tour eines bestehenden Tracks ändern oder löschen."""
-    tracks_df = get_tracks()
     with st.expander("✏️ Track bearbeiten", expanded=False):
         if tracks_df.empty:
             st.info("Noch keine Tracks vorhanden.")
@@ -132,10 +137,8 @@ def _render_track_edit_form() -> None:
                 "Tour", tour_opts, index=tour_index, format_func=lambda t: t[1]
             )
             col_save, col_delete = st.columns(2)
-            save = col_save.form_submit_button("Speichern", use_container_width=True)
-            delete = col_delete.form_submit_button(
-                "Löschen", use_container_width=True
-            )
+            save = col_save.form_submit_button("Speichern", width="stretch")
+            delete = col_delete.form_submit_button("Löschen", width="stretch")
 
         if save:
             update_track(selected_id, new_title, new_sport[0], new_tour[0])
@@ -147,7 +150,7 @@ def _render_track_edit_form() -> None:
             st.rerun()
 
 
-def _render_track_recalculate_form() -> None:
+def _render_track_recalculate_form(tracks_df) -> None:
     """
     Formular: 'Zeit in Bewegung' sowie Auf-/Abstieg eines einzelnen oder
     aller Tracks anhand neuer Schwellwerte aus den gespeicherten GPX-
@@ -162,7 +165,6 @@ def _render_track_recalculate_form() -> None:
     bleiben dabei unverändert, da sie nicht von diesen Schwellwerten
     abhängen.
     """
-    tracks_df = get_tracks()
     with st.expander("🔄 Track-Metadaten neu berechnen", expanded=False):
         if tracks_df.empty:
             st.info("Noch keine Tracks vorhanden.")
@@ -241,10 +243,9 @@ def _render_track_recalculate_form() -> None:
         st.rerun()
 
 
-def _render_track_overview() -> None:
+def _render_track_overview(tracks_df) -> None:
     """Tabelle aller vorhandenen Tracks."""
     st.subheader("Alle Tracks")
-    tracks_df = get_tracks()
     if tracks_df.empty:
         st.info("Noch keine Tracks vorhanden.")
         return
@@ -271,10 +272,13 @@ def _render_track_overview() -> None:
 
 
 def _render_tracks_tab() -> None:
+    # get_tracks() wird EINMAL je Rerun abgefragt und an die drei Bereiche
+    # durchgereicht (statt dreimal dieselbe Abfrage auszuführen).
+    tracks_df = get_tracks()
     _render_track_create_form()
-    _render_track_edit_form()
-    _render_track_recalculate_form()
-    _render_track_overview()
+    _render_track_edit_form(tracks_df)
+    _render_track_recalculate_form(tracks_df)
+    _render_track_overview(tracks_df)
 
 
 # ---------------------------------------------------------------------------
@@ -313,10 +317,8 @@ def _render_tour_edit_form() -> None:
         with st.form(key="tour_edit_form"):
             new_title = st.text_input("Tour-Titel", value=selected_title)
             col_save, col_delete = st.columns(2)
-            save = col_save.form_submit_button("Speichern", use_container_width=True)
-            delete = col_delete.form_submit_button(
-                "Löschen", use_container_width=True
-            )
+            save = col_save.form_submit_button("Speichern", width="stretch")
+            delete = col_delete.form_submit_button("Löschen", width="stretch")
 
         if save:
             update_tour(selected_id, new_title)
@@ -380,10 +382,8 @@ def _render_sport_edit_form() -> None:
         with st.form(key="sport_edit_form"):
             new_title = st.text_input("Sport-Titel", value=selected_title)
             col_save, col_delete = st.columns(2)
-            save = col_save.form_submit_button("Speichern", use_container_width=True)
-            delete = col_delete.form_submit_button(
-                "Löschen", use_container_width=True
-            )
+            save = col_save.form_submit_button("Speichern", width="stretch")
+            delete = col_delete.form_submit_button("Löschen", width="stretch")
 
         if save:
             update_sport(selected_id, new_title)

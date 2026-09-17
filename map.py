@@ -46,6 +46,10 @@ Aufbau der Seite:
    sowie einer weiteren GPX-Datei mit den gesetzten Punkten als Wegpunkte
    (siehe _build_planning_export_zip).
 
+Der Datenbankzugriff (load_metadata / load_track_files) liegt - wie aller
+übrige Datenzugriff auch - in functions.py; dieses Modul enthält nur
+UI-Code.
+
 Performance-Hinweis: GPX-Dateien werden aus DuckDB geladen und mit GeoPandas
 aufwendig nachbearbeitet (Distanz, Tempo, Steigung, ...). Da Streamlit bei
 JEDER Nutzerinteraktion das komplette Skript neu ausführt (auch bei einem
@@ -58,6 +62,7 @@ import io  # ZIP-Export im Planungsmodus (in-memory statt temporärer Dateien)
 import zipfile  # ZIP-Export im Planungsmodus
 
 import folium  # Erzeugt die interaktive Leaflet-Karte
+from folium.plugins import Fullscreen  # Vollbild-Schaltfläche der Karte
 import branca.colormap as cm  # Farbskala für die Karten-Einfärbung
 import gpxpy  # GPX-Export der Teile/Punkte im Planungsmodus
 import gpxpy.gpx
@@ -73,15 +78,10 @@ from functions import (
     DEFAULT_MIN_SPEED_MOVING_KMH,
     compute_ascent_descent,
     compute_moving_time_s,
-    get_connection,
+    load_metadata,
+    load_track_files,
     process_track,
 )
-
-# Die Verbindung wird beim ersten Import dieses Moduls einmalig über
-# functions.get_connection() geholt (siehe dortige Erläuterung zu
-# @st.cache_resource) - admin.py nutzt über denselben Aufruf dieselbe
-# Verbindung.
-con = get_connection()
 
 
 # --------------------------------------------------------------------------
@@ -157,66 +157,6 @@ def _resolve_map_profile_height() -> tuple[int, int]:
         total_height_px = _DEFAULT_TOTAL_HEIGHT_PX
     total_height_px = min(total_height_px, _MAX_TOTAL_HEIGHT_PX)
     return _split_map_profile_height(total_height_px)
-
-
-# --------------------------------------------------------------------------
-# Datenzugriff (gecacht)
-# --------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=60)
-def load_metadata() -> pd.DataFrame:
-    """
-    Lädt nur die "leichten" Metadaten aller Tracks (Titel, Bounding-Box,
-    Min/Max-Werte für Tempo/Höhe/Gefälle, Kennzahlen wie Distanz/Dauer/
-    Auf-/Abstieg sowie Start-/End-Land, ...) - bewusst OHNE die teils
-    großen GPX-Binärdaten (file_data). Diese Metadaten werden für die
-    Sidebar-Filter (Sport/Land/Tour/Track-Auswahl) sowie die Kennzahlen-
-    Anzeige gebraucht.
-
-    ttl=60: nach 60 Sekunden wird neu aus der DB gelesen, falls z.B.
-    zwischenzeitlich in der Verwaltung neue Tracks angelegt wurden.
-
-    WICHTIG: Die Abfrage geht bewusst von 'gpx' aus (nicht von 'tours'),
-    damit auch Tracks OHNE zugeordnete Tour angezeigt werden - bei einer
-    Abfrage ausgehend von 'tours' würden solche Tracks durch den JOIN
-    stillschweigend herausfallen.
-    """
-    return con.sql("""
-        SELECT
-            gpx.track_id, gpx.track_title, gpx.time_start,
-            gpx.location_lat_min, gpx.location_lat_max,
-            gpx.location_lon_min, gpx.location_lon_max,
-            gpx.location_start_country, gpx.location_end_country,
-            gpx.speed_min, gpx.speed_max,
-            gpx.elevation_min, gpx.elevation_max,
-            gpx.slope_min, gpx.slope_max,
-            gpx.track_distance_m, gpx.track_time_s, gpx.track_time_moving_s,
-            gpx.track_ascent_m, gpx.track_descent_m,
-            gpx.sport_id, sport.sport_title,
-            gpx.tour_id, tours.tour_title
-        FROM gpx
-        LEFT JOIN tours ON gpx.tour_id = tours.tour_id
-        LEFT JOIN sport ON gpx.sport_id = sport.sport_id
-        ORDER BY gpx.time_start ASC
-        """).fetchdf()
-
-
-@st.cache_data(show_spinner=False, ttl=60)
-def load_track_files(track_ids: tuple) -> pd.DataFrame:
-    """
-    Lädt die GPX-Binärdaten NUR für die übergebenen track_ids.
-
-    Wird erst aufgerufen, nachdem die Sidebar-Filter feststehen, damit nicht
-    bei jedem Rerun die (potenziell großen) GPX-Dateien aller Tracks aus der
-    gesamten Datenbank übertragen werden müssen.
-    """
-    if not track_ids:
-        return pd.DataFrame(columns=["track_id", "file_data"])
-
-    # Platzhalter ("?, ?, ?, ...") statt String-Interpolation -> verhindert
-    # SQL-Injection und funktioniert unabhängig von der Anzahl der IDs.
-    placeholders = ",".join(["?"] * len(track_ids))
-    query = f"SELECT track_id, file_data FROM gpx WHERE track_id IN ({placeholders})"
-    return con.execute(query, list(track_ids)).fetchdf()
 
 
 # --------------------------------------------------------------------------
@@ -411,7 +351,7 @@ def _format_distance_km(meters: float) -> str:
 
 
 def _format_duration(seconds: float) -> str:
-    """Formatiert eine Dauer in Sekunden als 'Hh MMmin'-Text, z.B. '3h 45min'."""
+    """Formatiert eine Dauer in Sekunden als 'H:MM h'-Text, z.B. '3:45 h'."""
     if pd.isna(seconds):
         return "–"
     total_minutes = int(round(seconds / 60))
@@ -517,8 +457,8 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
         ("Max. Höhe", df["elevation_max"].max(), _format_meters, df["elevation_max"]),
     ]
 
-    # [1, 4]: schmale Box links (am Rand verankert), breiterer Bereich
-    # daneben für die kleingedruckten Einzelwerte je Track.
+    # [3, 2]: Kennzahlen-Box links, daneben die kleingedruckten
+    # Einzelwerte je Track.
     for label, total_value, formatter, per_track_values in kpi_rows:
         st.divider()
         col_box, col_tracks = st.columns([3, 2])
@@ -526,8 +466,7 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
             st.metric(label, formatter(total_value))
         with col_tracks:
             for title, value in zip(df["track_title"], per_track_values):
-                st.caption(f"{title}: {formatter(value)}")    
-
+                st.caption(f"{title}: {formatter(value)}")
 
 
 # --------------------------------------------------------------------------
@@ -856,21 +795,22 @@ def _render_map_and_profile(
         [df["location_lat_max"].max(), df["location_lon_max"].max()],
     ]
 
-    range_speed = [df["speed_min"].min(), df["speed_max"].max()]
     range_elevation = [df["elevation_min"].min(), df["elevation_max"].max()]
-    range_slope = [df["slope_min"].min(), df["slope_max"].max()]
-    range_none = [1, 1]
+    # Rand ober-/unterhalb des Höhenprofils: fester Anteil der Höhendifferenz
+    # (nicht Faktor auf den Wert selbst - das bräche bei Höhen um 0 m bzw.
+    # unter dem Meeresspiegel).
+    ele_lo, ele_hi = range_elevation
+    ele_pad = max((ele_hi - ele_lo) * 0.1, 10)
 
     # Je nach gewählter Farb-Spalte den passenden Wertebereich für die
-    # Farbskala (vmin/vmax) auswählen.
-    if st.session_state.plot_column == "km_per_h":
-        range_att = range_speed
-    elif st.session_state.plot_column == "ele":
-        range_att = range_elevation
-    elif st.session_state.plot_column == "slope":
-        range_att = range_slope
-    else:
-        range_att = range_none
+    # Farbskala (vmin/vmax) auswählen; "none" (einfarbig) nutzt einen
+    # Dummy-Bereich, da dann gar keine Werte eingefärbt werden.
+    plot_column = st.session_state.plot_column
+    range_att = {
+        "km_per_h": [df["speed_min"].min(), df["speed_max"].max()],
+        "ele": range_elevation,
+        "slope": [df["slope_min"].min(), df["slope_max"].max()],
+    }.get(plot_column, [1, 1])
 
     # ----------------------------------------------------------------------
     # Klick-Auswahl im Höhenprofil: Zustand verwalten
@@ -878,16 +818,12 @@ def _render_map_and_profile(
     # st.session_state.selected_point hält den zuletzt im Profil angeklickten
     # Punkt als Dict {"track_id", "point_index", "lat", "lon"} fest und
     # überlebt damit auch den Rerun, der durch den Klick selbst ausgelöst wird.
-    if "selected_point" not in st.session_state:
-        st.session_state.selected_point = None
-    selected_point = st.session_state.selected_point
+    selected_point = st.session_state.setdefault("selected_point", None)
 
     # Unterteilungspunkte je Track (track_id -> sortierte Liste von
-    # Punkt-Indizes), siehe _toggle_split_point. Wird defensiv auch hier
-    # initialisiert, obwohl render_map_page() das bereits zentral erledigt
-    # (siehe dort), damit diese Funktion auch unabhängig davon funktioniert.
-    if "split_points" not in st.session_state:
-        st.session_state.split_points = {}
+    # Punkt-Indizes), siehe _toggle_split_point. Defensiv auch hier gesetzt,
+    # damit diese Funktion unabhängig von render_map_page() funktioniert.
+    st.session_state.setdefault("split_points", {})
 
     # Wenn sich die Sidebar-Filter geändert haben (andere/weniger/mehr
     # Tracks), verwerfen wir eine evtl. vorhandene Punkt-Auswahl. Zusätzlich
@@ -971,8 +907,7 @@ def _render_map_and_profile(
     # zweites Mal für denselben Track aufzurufen.
     track_store = dict(track_store_seed) if track_store_seed else {}
 
-    for i in range(0, len(df)):
-
+    for i in range(len(df)):
         gpx_file = df["file_data"].iloc[i]
         track_id = df["track_id"].iloc[i]
 
@@ -1031,8 +966,8 @@ def _render_map_and_profile(
         # Werte der gewählten Spalte (Höhe/Tempo/Gefälle) für die Einfärbung
         # der Linie; bei "Nichts" wird stattdessen ein konstanter Wert
         # verwendet, damit die Linie trotzdem (einfarbig) gezeichnet wird.
-        if st.session_state.plot_column != "none":
-            track_att = gdf[st.session_state.plot_column].values.tolist()
+        if plot_column != "none":
+            track_att = gdf[plot_column].values.tolist()
         else:
             track_att = np.repeat([1], len(track_loc))
 
@@ -1143,8 +1078,8 @@ def _render_map_and_profile(
                         (0.0, "rgba(120, 190, 170, 0.0)"),
                         (1.0, "rgba(120, 190, 170, 0.8)"),
                     ],
-                    start=range_elevation[0] * 0.9,
-                    stop=range_elevation[1] * 1.1,
+                    start=ele_lo - ele_pad,
+                    stop=ele_hi + ele_pad,
                 ),
                 # Hover zeigt dieselben Kennzahlen wie die Hover-Marker auf
                 # der Karte (siehe _build_hover_texts) - "<extra></extra>"
@@ -1179,7 +1114,13 @@ def _render_map_and_profile(
                 showlegend=False,
             )
         )
-        fig.update_yaxes(range=[gdf["ele"].min() * 0.9, gdf["ele"].max() * 1.1])
+
+    # y-Bereich des Höhenprofils EINMAL über ALLE ausgewählten Tracks
+    # setzen (zuvor wurde er in der Schleife je Track überschrieben, sodass
+    # am Ende nur der letzte Track passend skaliert war und die übrigen
+    # Profile abgeschnitten wurden). Der Rand wird als fester Anteil der
+    # Höhendifferenz aufgeschlagen (siehe ele_pad oben).
+    fig.update_yaxes(range=[ele_lo - ele_pad, ele_hi + ele_pad])
 
     # Ausgewählten Punkt zuletzt auf der Karte einzeichnen, damit er
     # garantiert über allen Track-Linien/-Markern liegt (Folium zeichnet
@@ -1197,15 +1138,17 @@ def _render_map_and_profile(
             weight=3,
         ).add_to(m)
 
-    m.add_child(track_col)
+    if plot_column != "none":
+        m.add_child(track_col)
     folium.LayerControl().add_to(m)
-    folium.plugins.Fullscreen(
+    Fullscreen(
         position="topleft",
-        title="Expand me",
-        title_cancel="Exit me",
+        title="Vollbild",
+        title_cancel="Vollbild beenden",
         force_separate_button=True,
-        ).add_to(m)
-    
+    ).add_to(m)
+
+
     # Key für st_folium: enkodiert sowohl die aktuelle Track-Auswahl als auch
     # die gewünschte Kartenhöhe.
     #
@@ -1371,7 +1314,13 @@ def render_map_page(settings_container=None) -> None:
     daher wird in diesem Fall ein eigener Expander angelegt.
     """
     if settings_container is None:
-        v = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
+        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
+
+    # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
+    # Punkt-Indizes) zentral initialisieren: _render_planning_kpis() wird
+    # weiter unten VOR _render_map_and_profile() aufgerufen und greift
+    # bereits darauf zu.
+    st.session_state.setdefault("split_points", {})
 
     # ----------------------------------------------------------------------
     # Aufklappbarer Seitenleisten-Bereich: Anzeigeeinstellungen

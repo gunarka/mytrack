@@ -1,15 +1,17 @@
 # Web-UI
-streamlit
-streamlit_folium
+# streamlit >= 1.49: width="stretch" (loest das abgekuendigte
+# use_container_width ab) sowie height= bei st.plotly_chart.
+streamlit>=1.49
+streamlit_folium>=0.24
 streamlit-javascript
 
 # Datenhaltung
-duckdb
-pandas
+duckdb>=1.0
+pandas>=2.0
 
 # GPX-Verarbeitung & Geodaten
 gpxpy
-geopandas
+geopandas>=1.0
 pyogrio
 
 # Geocoding & Zeitzone
@@ -17,6 +19,6 @@ geopy
 timezonefinder
 
 # Karte & Diagramme
-folium
+folium>=0.16
 branca
-plotly
+plotly>=5.23

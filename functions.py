@@ -191,6 +191,8 @@ def init_database() -> None:
         )
     """)
 
+    _invalidate_track_caches()
+
 
 # ---------------------------------------------------------------------------
 # GPX-Verarbeitung
@@ -215,6 +217,12 @@ def process_gpx_dataframe(gpx_bytes: bytes) -> gpd.GeoDataFrame:
     Geometrie siehe process_track().
     """
     gdf = gpd.read_file(io.BytesIO(gpx_bytes), layer="track_points")
+    if gdf.empty:
+        raise ValueError(
+            "Die GPX-Datei enthält keine Trackpunkte (<trkpt>). Reine "
+            "Wegpunkt- oder Routen-Dateien werden nicht unterstützt."
+        )
+    gdf = gdf.reset_index(drop=True)
     gdf.crs = "EPSG:4326"  # GPX liefert WGS84 (Grad-Koordinaten)
 
     # lat/lon als eigene Spalten sichern, BEVOR die Geometrie unten in ein
@@ -236,7 +244,13 @@ def process_gpx_dataframe(gpx_bytes: bytes) -> gpd.GeoDataFrame:
     gdf.at[0, "time_delta"] = pd.to_timedelta(0)
 
     # Geschwindigkeit in verschiedenen Einheiten ableiten.
-    gdf["m_per_s"] = gdf["dist_delta"] / gdf["time_delta"].dt.seconds
+    #
+    # WICHTIG: .dt.total_seconds() (nicht .dt.seconds). '.seconds' liefert
+    # nur den SEKUNDEN-ANTEIL einer Zeitdifferenz: Bruchteile werden
+    # abgeschnitten (0.5 s -> 0 -> Division durch 0 -> Tempo NaN, der Punkt
+    # zählt dann nie als "in Bewegung") und nach 24 h springt der Wert
+    # zurück auf 0.
+    gdf["m_per_s"] = gdf["dist_delta"] / gdf["time_delta"].dt.total_seconds()
     gdf.at[0, "m_per_s"] = 0
     gdf["km_per_h"] = gdf["m_per_s"] * 3.6
     gdf["min_per_km"] = 60 / gdf["km_per_h"]
@@ -451,9 +465,18 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     Detail bzw. zur Archivierung in der Datenbank). Ergebnis wird gecacht,
     damit derselbe Punkt nicht mehrfach gegen die (rate-limitierte)
     Nominatim-API angefragt wird.
+
+    Ist der Dienst nicht erreichbar (kein Internet, Zeitüberschreitung,
+    Rate-Limit), werden alle Felder als None zurückgegeben statt eine
+    Ausnahme auszulösen: Der Track lässt sich dann trotzdem hochladen und
+    verliert lediglich die Ortsangaben (die Start-/End-Adresse kann später
+    ergänzt werden, indem der Track erneut hochgeladen wird).
     """
-    geolocator = Nominatim(user_agent="gps_tracking_app")
-    location = geolocator.reverse((lat, lon))
+    geolocator = Nominatim(user_agent="mytrack_app", timeout=10)
+    try:
+        location = geolocator.reverse((lat, lon))
+    except Exception:
+        location = None
     address = location.raw.get("address", {}) if location else {}
     return {
         "country": address.get("country"),
@@ -640,6 +663,7 @@ def insert_sport(sport_title: str) -> str:
     con = get_connection()
     sport_id = str(uuid.uuid4())
     con.execute("INSERT INTO sport VALUES (?, ?)", [sport_id, sport_title])
+    _invalidate_track_caches()
     return sport_id
 
 
@@ -649,6 +673,7 @@ def update_sport(sport_id: str, sport_title: str) -> None:
     con.execute(
         "UPDATE sport SET sport_title = ? WHERE sport_id = ?", [sport_title, sport_id]
     )
+    _invalidate_track_caches()
 
 
 def delete_sport(sport_id: str) -> None:
@@ -662,6 +687,7 @@ def delete_sport(sport_id: str) -> None:
     con = get_connection()
     con.execute("UPDATE gpx SET sport_id = NULL WHERE sport_id = ?", [sport_id])
     con.execute("DELETE FROM sport WHERE sport_id = ?", [sport_id])
+    _invalidate_track_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +732,7 @@ def insert_tour(tour_title: str) -> str:
     con = get_connection()
     tour_id = str(uuid.uuid4())
     con.execute("INSERT INTO tours VALUES (?, ?)", [tour_id, tour_title])
+    _invalidate_track_caches()
     return tour_id
 
 
@@ -715,6 +742,7 @@ def update_tour(tour_id: str, tour_title: str) -> None:
     con.execute(
         "UPDATE tours SET tour_title = ? WHERE tour_id = ?", [tour_title, tour_id]
     )
+    _invalidate_track_caches()
 
 
 def delete_tour(tour_id: str) -> None:
@@ -727,6 +755,7 @@ def delete_tour(tour_id: str) -> None:
     con = get_connection()
     con.execute("UPDATE gpx SET tour_id = NULL WHERE tour_id = ?", [tour_id])
     con.execute("DELETE FROM tours WHERE tour_id = ?", [tour_id])
+    _invalidate_track_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +783,83 @@ def get_tracks() -> pd.DataFrame:
         LEFT JOIN tours ON gpx.tour_id  = tours.tour_id
         ORDER BY gpx.time_start DESC
     """).fetchdf()
+
+
+# ---------------------------------------------------------------------------
+# Gecachte Leseabfragen für die Kartenseite
+# ---------------------------------------------------------------------------
+# Beide Abfragen werden bei jeder Nutzerinteraktion auf der Kartenseite
+# gebraucht und deshalb gecacht. Statt eines Zeitablaufs (ttl) leert
+# _invalidate_track_caches() den Cache gezielt bei jeder Änderung an Tracks,
+# Touren oder Sportarten - dadurch ist die Karte sofort aktuell, ohne dass
+# die Abfragen bei jedem Klick erneut laufen.
+@st.cache_data(show_spinner=False)
+def load_metadata() -> pd.DataFrame:
+    """
+    Lädt nur die "leichten" Metadaten aller Tracks (Titel, Bounding-Box,
+    Min/Max-Werte für Tempo/Höhe/Gefälle, Kennzahlen wie Distanz/Dauer/
+    Auf-/Abstieg sowie Start-/End-Land, ...) - bewusst OHNE die teils
+    großen GPX-Binärdaten (file_data). Diese Metadaten werden für die
+    Sidebar-Filter (Sport/Land/Tour/Track-Auswahl) sowie die Kennzahlen-
+    Anzeige der Kartenseite gebraucht.
+
+    WICHTIG: Die Abfrage geht bewusst von 'gpx' aus (nicht von 'tours'),
+    damit auch Tracks OHNE zugeordnete Tour angezeigt werden - bei einer
+    Abfrage ausgehend von 'tours' würden solche Tracks durch den JOIN
+    stillschweigend herausfallen.
+    """
+    con = get_connection()
+    return con.sql("""
+        SELECT
+            gpx.track_id, gpx.track_title, gpx.time_start,
+            gpx.location_lat_min, gpx.location_lat_max,
+            gpx.location_lon_min, gpx.location_lon_max,
+            gpx.location_start_country, gpx.location_end_country,
+            gpx.speed_min, gpx.speed_max,
+            gpx.elevation_min, gpx.elevation_max,
+            gpx.slope_min, gpx.slope_max,
+            gpx.track_distance_m, gpx.track_time_s, gpx.track_time_moving_s,
+            gpx.track_ascent_m, gpx.track_descent_m,
+            gpx.sport_id, sport.sport_title,
+            gpx.tour_id, tours.tour_title
+        FROM gpx
+        LEFT JOIN tours ON gpx.tour_id = tours.tour_id
+        LEFT JOIN sport ON gpx.sport_id = sport.sport_id
+        ORDER BY gpx.time_start ASC
+        """).fetchdf()
+
+
+@st.cache_data(show_spinner=False)
+def load_track_files(track_ids: tuple) -> pd.DataFrame:
+    """
+    Lädt die GPX-Binärdaten NUR für die übergebenen track_ids.
+
+    Wird erst aufgerufen, nachdem die Sidebar-Filter feststehen, damit nicht
+    bei jedem Rerun die (potenziell großen) GPX-Dateien aller Tracks aus der
+    gesamten Datenbank übertragen werden müssen.
+    """
+    if not track_ids:
+        return pd.DataFrame(columns=["track_id", "file_data"])
+
+    # Platzhalter ("?, ?, ?, ...") statt String-Interpolation -> verhindert
+    # SQL-Injection und funktioniert unabhängig von der Anzahl der IDs.
+    con = get_connection()
+    placeholders = ",".join(["?"] * len(track_ids))
+    query = f"SELECT track_id, file_data FROM gpx WHERE track_id IN ({placeholders})"
+    return con.execute(query, list(track_ids)).fetchdf()
+
+
+def _invalidate_track_caches() -> None:
+    """
+    Leert die Lese-Caches der Kartenseite. Wird von allen schreibenden
+    Funktionen (insert/update/delete/recalculate) aufgerufen, damit
+    Änderungen aus der Verwaltung sofort auf der Karte sichtbar sind.
+
+    Bewusst NICHT st.cache_data.clear(): das würde auch den (teuren)
+    Cache der GPX-Verarbeitung (process_track) verwerfen.
+    """
+    load_metadata.clear()
+    load_track_files.clear()
 
 
 def insert_track(data: dict) -> None:
@@ -862,6 +968,7 @@ def insert_track(data: dict) -> None:
             TRY_CAST(time_stamp AS TIMESTAMP) AS time_stamp
         FROM row
     """)
+    _invalidate_track_caches()
 
 
 def update_track(track_id: str, track_title: str, sport_id: str | None, tour_id: str | None) -> None:
@@ -871,12 +978,14 @@ def update_track(track_id: str, track_title: str, sport_id: str | None, tour_id:
         "UPDATE gpx SET track_title = ?, sport_id = ?, tour_id = ? WHERE track_id = ?",
         [track_title, sport_id, tour_id, track_id],
     )
+    _invalidate_track_caches()
 
 
 def delete_track(track_id: str) -> None:
     """Löscht einen Track (inkl. der gespeicherten GPX-Datei) unwiderruflich."""
     con = get_connection()
     con.execute("DELETE FROM gpx WHERE track_id = ?", [track_id])
+    _invalidate_track_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -925,6 +1034,7 @@ def recalculate_track_metadata(
         """,
         [ascent_m, descent_m, moving_s, track_id],
     )
+    _invalidate_track_caches()
 
 
 def recalculate_all_tracks_metadata(

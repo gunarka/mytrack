@@ -7,14 +7,14 @@ Höhenprofil ansehen und in einer Verwaltungsoberfläche pflegen.
 
 ## Architektur
 
-Die App ist in vier Python-Dateien aufgeteilt:
+Die App ist in fünf Python-Dateien aufgeteilt:
 
 | Datei            | Zweck                                                                 |
 |------------------|------------------------------------------------------------------------|
 | `app.py`         | **Einstiegspunkt** (`streamlit run app.py`). Seitenkonfiguration, Titel/Beschreibung in der Seitenleiste, Navigation zwischen den Seiten. |
-| `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung sowie alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten. Enthält keinerlei Oberflächen-Code. |
+| `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen der Kartenseite (`load_metadata`, `load_track_files`). Enthält keinerlei Oberflächen-Code. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
-| `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion. |
+| `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion sowie der Planungsmodus. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
 `admin.py` und `map.py` stellen jeweils eine Funktion `render_admin_page()`
@@ -27,6 +27,11 @@ lassen sich zum Debuggen weiterhin auch einzeln starten
 Die Datenbankverbindung (`functions.get_connection()`) ist über
 `st.cache_resource` als Singleton implementiert: Alle Module im selben
 Streamlit-Prozess teilen sich dieselbe DuckDB-Verbindung.
+
+Die Leseabfragen der Kartenseite sind über `st.cache_data` gecacht. Jede
+schreibende Funktion (anlegen / ändern / löschen / neu berechnen) leert
+diesen Cache gezielt (`_invalidate_track_caches()`), sodass Änderungen aus
+der Verwaltung sofort auf der Karte sichtbar sind.
 
 ## Datenmodell
 
@@ -56,6 +61,9 @@ verlieren lediglich die Zuordnung (`sport_id`/`tour_id` wird `NULL`).
 
 ## Installation & Start
 
+Benötigt Python 3.10+ und Streamlit 1.49 oder neuer (für `width="stretch"`
+sowie `height=` bei `st.plotly_chart`).
+
 ```bash
 pip install -r requirements.txt
 
@@ -74,6 +82,11 @@ ist eine Internetverbindung nötig. Bitte die
 [Nutzungsbedingungen](https://operations.osmfoundation.org/policies/nominatim/)
 von Nominatim beachten (u. a. Rate-Limit von 1 Anfrage/Sekunde); bei sehr
 vielen Uploads hintereinander kann es deshalb etwas dauern.
+
+Ist der Dienst nicht erreichbar, schlägt der Upload **nicht** fehl: Der
+Track wird ohne Ortsangaben gespeichert (der Land-Filter auf der Karte
+zeigt ihn dann nicht an). Um die Adressen nachzutragen, den Track erneut
+hochladen.
 
 ## Nutzung
 
@@ -119,6 +132,30 @@ aufklappbar darunter dieselben Kennzahlen je einzelnem Track.
 Ein Klick auf einen Punkt im Höhenprofil zentriert die Karte auf den
 entsprechenden Ort.
 
+**Planung** (Schalter "📐 Planung" in der Seitenleiste):
+
+Ist genau **ein** Track ausgewählt, lässt sich der Planungsmodus
+einschalten. Darin wird der Track per Mausklick – auf die Karte oder ins
+Höhenprofil – in Teile unterteilt:
+
+- Ein Klick setzt einen Unterteilungspunkt (auf der Karte wird der
+  nächstgelegene Trackpunkt verwendet), ein erneuter Klick auf denselben
+  Punkt entfernt ihn wieder; alternativ über das "✕" in der Punkteliste.
+- Die Kennzahlen-Box zeigt statt der Werte je Track die Werte je Teil.
+- "📦 Export" lädt eine ZIP-Datei mit je einer GPX-Datei pro Teil sowie
+  einer weiteren GPX-Datei mit den Unterteilungspunkten als Wegpunkte.
+
+Wird ein zweiter Track dazu ausgewählt, schaltet sich der Modus
+automatisch wieder ab.
+
+### Anzeigeeinstellungen
+
+Im Bereich "⚙️ Einstellungen" der Seitenleiste (zusammen mit der
+Navigation): Farb-Spalte für Karte und Höhenprofil, Breite der
+Kennzahlen-Spalte sowie die Höhe von Karte + Profil – wahlweise
+automatisch an die Browser-Fensterhöhe angepasst oder manuell per
+Schieberegler.
+
 ## Hinweise / Einschränkungen
 
 - DuckDB erlaubt pro Datenbankdatei nur **eine** schreibende Verbindung
@@ -129,4 +166,9 @@ entsprechenden Ort.
   aufwändige GeoPandas-Berechnung auslösen.
 - Für den Datei-Upload werden ausschließlich `.gpx`-Dateien mit einem
   `<trk>`-Track akzeptiert (Format wie von gängigen GPS-Geräten/Apps
-  exportiert).
+  exportiert). Dateien ohne Trackpunkte (reine Wegpunkt- oder
+  Routen-Dateien) werden mit einer Meldung abgewiesen, statt die Seite
+  mit einem Fehler abbrechen zu lassen.
+- Kennzahlen aus Zeit und Tempo setzen Zeitstempel in der GPX-Datei
+  voraus. Fehlen sie, bleiben Dauer, Tempo und "Zeit in Bewegung" leer;
+  Distanz und Höhenwerte werden trotzdem berechnet.
