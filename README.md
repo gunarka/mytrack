@@ -7,22 +7,25 @@ Höhenprofil ansehen und in einer Verwaltungsoberfläche pflegen.
 
 ## Architektur
 
-Die App ist in fünf Python-Dateien aufgeteilt:
+Die App ist in sechs Python-Dateien aufgeteilt:
 
 | Datei            | Zweck                                                                 |
 |------------------|------------------------------------------------------------------------|
 | `app.py`         | **Einstiegspunkt** (`streamlit run app.py`). Seitenkonfiguration, Titel/Beschreibung in der Seitenleiste, Navigation zwischen den Seiten. |
-| `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen der Kartenseite (`load_metadata`, `load_track_files`). Enthält keinerlei Oberflächen-Code. |
+| `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, Bestzeiten-Auswertung, GPX-Export, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen von Karte und Statistik (`load_metadata`, `load_track_files`, `load_heatmap_points`). Enthält keinerlei Oberflächen-Code. |
+| `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
 | `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion sowie der Planungsmodus. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
-`admin.py` und `map.py` stellen jeweils eine Funktion `render_admin_page()`
-bzw. `render_map_page()` bereit. `app.py` registriert diese über
+`map.py`, `stats.py` und `admin.py` stellen jeweils eine Funktion
+`render_map_page()`, `render_stats_page()` bzw. `render_admin_page()`
+bereit. `app.py` registriert diese über
 [`st.navigation`](https://docs.streamlit.io/develop/api-reference/navigation/st.navigation)
 als Seiten und kümmert sich um die gemeinsame Seitenleiste. Beide Dateien
 lassen sich zum Debuggen weiterhin auch einzeln starten
-(`streamlit run admin.py` / `streamlit run map.py`).
+(`streamlit run admin.py` / `streamlit run map.py` /
+`streamlit run stats.py`).
 
 Die Datenbankverbindung (`functions.get_connection()`) ist über
 `st.cache_resource` als Singleton implementiert: Alle Module im selben
@@ -94,13 +97,20 @@ hochladen.
 
 1. Zuerst optional Sportarten und/oder Touren anlegen (Tabs "Sportarten" /
    "Touren").
-2. Im Tab "Tracks" eine GPX-Datei hochladen, optional Titel/Sport/Tour
-   vergeben und speichern – Distanz, Dauer, Zeit in Bewegung,
+2. Im Tab "Tracks" eine oder **mehrere** GPX-Dateien auf einmal
+   hochladen, optional Titel/Sport/Tour vergeben und speichern – Distanz, Dauer, Zeit in Bewegung,
    Höhenprofil-Kennzahlen sowie Start-/Endort werden automatisch
    berechnet.
+   Ein gemeinsamer Titel wird nur bei einer einzelnen Datei verwendet;
+   bei mehreren dient jeweils der Dateiname als Titel. Scheitert eine
+   Datei, werden die übrigen trotzdem gespeichert.
 3. Bestehende Tracks, Touren und Sportarten lassen sich im jeweiligen
-   "Bearbeiten"-Bereich umbenennen bzw. löschen. Alle vorhandenen Einträge
-   werden zusätzlich in einer Übersichtstabelle angezeigt.
+   "Bearbeiten"-Bereich umbenennen bzw. löschen. Dort steht auch
+   **"⬇️ GPX herunterladen"** bereit, das die ursprünglich hochgeladene
+   Datei wieder ausgibt. Alle vorhandenen Einträge werden zusätzlich in
+   einer Übersichtstabelle angezeigt; dort lässt sich die Spalte "Track"
+   **direkt bearbeiten**, um mehrere Titel auf einmal umzubenennen
+   (Speichern per Knopf darunter).
 4. Im Bereich "Track-Metadaten neu berechnen" (Tab "Tracks") lassen sich
    "Zeit in Bewegung" sowie Auf-/Abstieg eines einzelnen oder aller
    Tracks anhand neu eingegebener Schwellwerte (minimale Geschwindigkeit
@@ -109,6 +119,12 @@ hochladen.
    einen bestimmten Tracktyp nicht passen. Optional wird der
    Höhenänderungs-Schwellwert dabei mit der je Punkt gespeicherten
    GPS-Genauigkeit skaliert, sofern diese in der GPX-Datei vorhanden ist.
+   Alternativ lässt sich dort eine **Glättung der Höhe** (gleitender
+   Mittelwert über n Trackpunkte) einstellen – siehe unten.
+5. Im Tab "Touren" gibt es je Tour **"⬇️ Tour als GPX exportieren"**:
+   alle Tracks der Tour in einer Datei, zeitlich sortiert und je Etappe
+   als eigenes Segment (`<trkseg>`), damit Pausen zwischen den Etappen
+   nicht als Luftlinie interpretiert werden.
 
 **Karte** (Seite "Karte"):
 
@@ -125,9 +141,20 @@ gezielt einzeln (ab-)wählen. Es muss mindestens ein Track ausgewählt sein.
 Zusätzlich kann oben eine Farb-Spalte für das Höhenprofil gewählt werden
 (Höhe, Geschwindigkeit, Gefälle oder einfarbig).
 
-Oberhalb der Karte zeigt ein Kennzahlen-Bereich Länge, Zeit, Auf-/Abstieg
-sowie Min-/Max-Höhe als Summe über alle aktuell ausgewählten Tracks an;
-aufklappbar darunter dieselben Kennzahlen je einzelnem Track.
+Links neben der Karte zeigt ein Kennzahlen-Bereich Länge, Zeit, Zeit in
+Bewegung, Pause, Ø-Tempo, Ø-Tempo in Bewegung, Auf-/Abstieg sowie
+Min-/Max-Höhe als Summe über alle aktuell ausgewählten Tracks an; klein
+daneben jeweils die Werte je einzelnem Track. Die Durchschnittstempi
+werden aus Gesamtstrecke / Gesamtzeit gebildet (nicht als Mittelwert der
+Einzeldurchschnitte), damit lange Tracks nicht gleich stark gewichtet
+werden wie kurze.
+
+Ist genau **ein** Track ausgewählt, erscheint darunter der Bereich
+**"🏅 Bestzeiten"**: je Standarddistanz (1 km, 5 km, 10 km, Halbmarathon,
+Marathon) der schnellste zusammenhängende Abschnitt irgendwo im Track –
+mit Tempo und der Kilometerstelle, an der er beginnt. Grundlage ist die
+ohnehin berechnete kumulierte Distanz, es ist also keine zusätzliche
+Geo-Berechnung nötig.
 
 Ein Klick auf einen Punkt im Höhenprofil zentriert die Karte auf den
 entsprechenden Ort.
@@ -156,6 +183,39 @@ Kennzahlen-Spalte sowie die Höhe von Karte + Profil – wahlweise
 automatisch an die Browser-Fensterhöhe angepasst oder manuell per
 Schieberegler.
 
+**Statistik** (Seite "Statistik"):
+
+Auswertung über alle Tracks hinweg, ohne Filter:
+
+- Kopfzeile mit Anzahl Tracks, Gesamtstrecke, Gesamtaufstieg und
+  Gesamtzeit.
+- Tab "Zeitverlauf": Kilometer je Jahr (mit Aufstieg und Anzahl Tracks)
+  sowie Kilometer je Monat für ein auswählbares Jahr.
+- Tab "Sportarten": Aufstiegsmeter je Sportart als Diagramm, dazu eine
+  Tabelle mit Anzahl Tracks, Kilometern, Aufstieg und Stunden.
+- Tab "Heatmap": alle aufgezeichneten Punkte als Wärmekarte – zeigt auf
+  einen Blick, welche Gegenden und Strecken wie oft zurückgelegt wurden.
+  Die Punkte werden ausgedünnt geladen (jeder 10.) und gecacht.
+
+## Auf- und Abstieg: Schwellwert oder Glättung
+
+Für Auf-/Abstieg stehen zwei Verfahren zur Verfügung, die sich in der
+Verwaltung ("Track-Metadaten neu berechnen") auch kombinieren lassen:
+
+- **Schwellwert mit Hysterese** (Standard): Höhenänderungen unterhalb der
+  eingestellten minimalen Höhenänderung gelten als Rauschen. Robust gegen
+  zappelnde GPS-Höhen, unterschätzt aber lange, gleichmäßig flache
+  Anstiege, deren Einzelschritte jeweils unter dem Schwellwert bleiben.
+- **Glättung** (gleitender Mittelwert über n Trackpunkte): mittelt das
+  Rauschen weg und erhält den langsamen Trend. Bei barometrisch
+  aufgezeichneten Höhen (Sportuhr, Radcomputer) meist die genauere
+  Variante. Für das reine Glättungsverfahren die minimale Höhenänderung
+  auf `0` und die Glättung auf z.B. `15` setzen.
+
+Beispiel (synthetischer Track, gleichmäßiger Anstieg von 600 m mit ±2 m
+Rauschen): Schwellwert 2 m ergibt 1183 m, ohne Schwellwert 1463 m,
+Glättung über 15 Punkte 596 m.
+
 ## Hinweise / Einschränkungen
 
 - DuckDB erlaubt pro Datenbankdatei nur **eine** schreibende Verbindung
@@ -164,6 +224,12 @@ Schieberegler.
 - Die GPX-Verarbeitung (Distanz/Tempo/Steigung) wird pro Track gecacht
   (`@st.cache_data`), damit Klicks im Höhenprofil keine erneute,
   aufwändige GeoPandas-Berechnung auslösen.
+- Die Heatmap der Statistik-Seite muss beim ersten Aufruf alle
+  GPX-Dateien einlesen; das Ergebnis wird gecacht und erst bei der
+  nächsten Änderung an den Tracks neu aufgebaut.
+- "Bestzeiten" wertet nur EINEN Track aus. Über mehrere Tracks hinweg
+  wäre der Begriff nicht sinnvoll definiert, da Abschnitte sonst über
+  getrennte Aufzeichnungen hinweg laufen würden.
 - Für den Datei-Upload werden ausschließlich `.gpx`-Dateien mit einem
   `<trk>`-Track akzeptiert (Format wie von gängigen GPS-Geräten/Apps
   exportiert). Dateien ohne Trackpunkte (reine Wegpunkt- oder

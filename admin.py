@@ -33,22 +33,26 @@ ausschließlich UI-Code, der diese Funktionen aufruft.
 import streamlit as st
 
 from functions import (
+    DEFAULT_ELEVATION_SMOOTHING_WINDOW,
     DEFAULT_MIN_ELEVATION_CHANGE_M,
     DEFAULT_MIN_SPEED_MOVING_KMH,
     delete_sport,
     delete_tour,
     delete_track,
+    export_tour_gpx,
     get_sports,
     get_sports_overview,
+    get_track_file,
     get_tours,
     get_tours_overview,
     get_tracks,
     insert_sport,
     insert_tour,
-    process_and_build_track,
     insert_track,
+    process_and_build_track,
     recalculate_all_tracks_metadata,
     recalculate_track_metadata,
+    rename_tracks,
     sports_options,
     tours_options,
     update_sport,
@@ -61,11 +65,30 @@ from functions import (
 # Tab "Tracks"
 # ---------------------------------------------------------------------------
 def _render_track_create_form() -> None:
-    """Formular: neue GPX-Datei hochladen, verarbeiten und speichern."""
-    with st.expander("➕ Neuen Track hochladen", expanded=True):
+    """
+    Formular: eine oder MEHRERE GPX-Dateien hochladen, verarbeiten und
+    speichern.
+
+    Bei mehreren Dateien wird jede einzeln verarbeitet; scheitert eine
+    davon (z.B. eine beschädigte Datei), werden die übrigen trotzdem
+    gespeichert und am Ende eine Zusammenfassung angezeigt - ein
+    Sammel-Import bricht also nicht am ersten Problemfall ab.
+    """
+    with st.expander("➕ Neue Tracks hochladen", expanded=True):
         with st.form(key="track_create_form", clear_on_submit=True):
-            gpx_file = st.file_uploader("GPX-Datei", type=["gpx"])
-            track_title = st.text_input("Track-Titel (optional, sonst Dateiname)")
+            gpx_files = st.file_uploader(
+                "GPX-Dateien",
+                type=["gpx"],
+                accept_multiple_files=True,
+                help="Mehrere Dateien auf einmal möglich.",
+            )
+            track_title = st.text_input(
+                "Track-Titel (optional, sonst Dateiname)",
+                help=(
+                    "Wird nur bei EINER Datei verwendet. Bei mehreren "
+                    "Dateien dient jeweils der Dateiname als Titel."
+                ),
+            )
             sport = st.selectbox(
                 "Sport", sports_options(), format_func=lambda s: s[1]
             )
@@ -76,18 +99,24 @@ def _render_track_create_form() -> None:
 
         if not submitted:
             return
-        if gpx_file is None:
-            st.warning("Bitte zuerst eine GPX-Datei auswählen.")
+        if not gpx_files:
+            st.warning("Bitte zuerst mindestens eine GPX-Datei auswählen.")
             return
 
-        title = track_title or gpx_file.name
-        # Reverse-Geocoding + Zeitzonen-Ermittlung brauchen einen Moment -
-        # daher ein sichtbarer Spinner, statt dass die Seite scheinbar
-        # "einfriert". Schlägt das Einlesen fehl (z.B. GPX ohne Trackpunkte
-        # oder beschädigte Datei), wird eine verständliche Meldung
-        # angezeigt statt eines Python-Fehlers mitten in der Oberfläche.
-        try:
-            with st.spinner(f"Verarbeite '{gpx_file.name}' …"):
+        # Reverse-Geocoding + Zeitzonen-Ermittlung brauchen pro Datei einen
+        # Moment (Nominatim ist auf 1 Anfrage/Sekunde begrenzt) - daher eine
+        # Fortschrittsanzeige statt einer scheinbar eingefrorenen Seite.
+        progress = st.progress(0.0, text="Verarbeite Dateien …")
+        saved, failed = [], []
+        for number, gpx_file in enumerate(gpx_files, start=1):
+            progress.progress(
+                (number - 1) / len(gpx_files),
+                text=f"Verarbeite '{gpx_file.name}' ({number}/{len(gpx_files)}) …",
+            )
+            # Ein gemeinsamer Titel ergibt nur bei einer einzelnen Datei
+            # Sinn - sonst hießen alle Tracks gleich.
+            title = track_title if (track_title and len(gpx_files) == 1) else gpx_file.name
+            try:
                 record = process_and_build_track(
                     file_name=gpx_file.name,
                     file_bytes=gpx_file.getvalue(),
@@ -96,11 +125,17 @@ def _render_track_create_form() -> None:
                     tour_id=tour[0],
                 )
                 insert_track(record)
-        except Exception as error:
-            st.error(f"'{gpx_file.name}' konnte nicht verarbeitet werden: {error}")
-            return
-        st.success(f"Track '{title}' gespeichert.")
-        st.rerun()
+                saved.append(title)
+            except Exception as error:
+                failed.append(f"{gpx_file.name}: {error}")
+        progress.empty()
+
+        if saved:
+            st.success(f"{len(saved)} Track(s) gespeichert: {', '.join(saved)}")
+        for message in failed:
+            st.error(f"Nicht verarbeitet – {message}")
+        if saved:
+            st.rerun()
 
 
 def _render_track_edit_form(tracks_df) -> None:
@@ -139,6 +174,21 @@ def _render_track_edit_form(tracks_df) -> None:
             col_save, col_delete = st.columns(2)
             save = col_save.form_submit_button("Speichern", width="stretch")
             delete = col_delete.form_submit_button("Löschen", width="stretch")
+
+        # Download der ursprünglich hochgeladenen GPX-Datei. Bewusst
+        # AUSSERHALB des Formulars: st.download_button ist innerhalb von
+        # st.form nicht zulässig.
+        original = get_track_file(selected_id)
+        if original is not None:
+            file_name, file_bytes = original
+            st.download_button(
+                "⬇️ GPX herunterladen",
+                data=file_bytes,
+                file_name=file_name,
+                mime="application/gpx+xml",
+                key=f"track_download_{selected_id}",
+                width="stretch",
+            )
 
         if save:
             update_track(selected_id, new_title, new_sport[0], new_tour[0])
@@ -206,6 +256,23 @@ def _render_track_recalculate_form(tracks_df) -> None:
                     "gezählt (Schwellwert-Verfahren mit Hysterese)."
                 ),
             )
+            smoothing_window = st.number_input(
+                "Glättung der Höhe (Anzahl Punkte, 0 = aus)",
+                min_value=0,
+                max_value=101,
+                value=DEFAULT_ELEVATION_SMOOTHING_WINDOW,
+                step=1,
+                help=(
+                    "Alternative zum Schwellwertverfahren: Die Höhe wird "
+                    "vorab mit einem gleitenden Mittelwert über so viele "
+                    "Trackpunkte geglättet. Das entfernt Messrauschen, "
+                    "ohne - wie der Schwellwert - flache, gleichmäßige "
+                    "Anstiege zu verschlucken; bei barometrisch "
+                    "aufgezeichneten Höhen meist die genauere Variante. "
+                    "Reine Glättung: hier z.B. 15 und die minimale "
+                    "Höhenänderung oben auf 0 setzen."
+                ),
+            )
             use_accuracy = st.checkbox(
                 "Schwellwert mit gespeicherter GPS-Genauigkeit skalieren "
                 "(falls in der GPX-Datei vorhanden)",
@@ -230,6 +297,7 @@ def _render_track_recalculate_form(tracks_df) -> None:
                     min_speed_moving_kmh=min_speed,
                     min_elevation_change_m=min_ele_change,
                     use_gps_accuracy=use_accuracy,
+                    smoothing_window=int(smoothing_window),
                 )
             else:
                 recalculate_track_metadata(
@@ -237,6 +305,7 @@ def _render_track_recalculate_form(tracks_df) -> None:
                     min_speed_moving_kmh=min_speed,
                     min_elevation_change_m=min_ele_change,
                     use_gps_accuracy=use_accuracy,
+                    smoothing_window=int(smoothing_window),
                 )
                 count = 1
         st.success(f"Metadaten für {count} Track(s) neu berechnet.")
@@ -244,11 +313,21 @@ def _render_track_recalculate_form(tracks_df) -> None:
 
 
 def _render_track_overview(tracks_df) -> None:
-    """Tabelle aller vorhandenen Tracks."""
+    """
+    Tabelle aller vorhandenen Tracks - die Spalte "Track" ist direkt
+    editierbar (st.data_editor), sodass sich Titel umbenennen lassen, ohne
+    jeden Track einzeln im Bearbeiten-Formular auszuwählen.
+
+    Alle übrigen Spalten sind gesperrt: Sie sind entweder berechnet
+    (Distanz, Dauer, ...) oder bräuchten eine Auswahlliste (Sport, Tour) -
+    dafür bleibt das Bearbeiten-Formular weiter zuständig. Gespeichert wird
+    erst auf Knopfdruck, und zwar nur die tatsächlich geänderten Zeilen.
+    """
     st.subheader("Alle Tracks")
     if tracks_df.empty:
         st.info("Noch keine Tracks vorhanden.")
         return
+
     display_df = tracks_df.rename(columns={
         "track_title": "Track",
         "sport_title": "Sport",
@@ -263,12 +342,40 @@ def _render_track_overview(tracks_df) -> None:
         "location_start_county": "Start-Gebiet",
         "location_end_county": "End-Gebiet",
         "file_name": "Datei",
-    })
-    st.dataframe(
-        display_df.drop(columns=["track_id", "sport_id", "tour_id"]),
+    }).drop(columns=["sport_id", "tour_id"])
+
+    st.caption("Titel in der Spalte 'Track' lassen sich direkt bearbeiten.")
+    editable_columns = [c for c in display_df.columns if c not in ("track_id", "Track")]
+    edited_df = st.data_editor(
+        display_df,
         hide_index=True,
         width="stretch",
+        key="track_overview_editor",
+        disabled=editable_columns,
+        column_config={
+            # track_id wird gebraucht, um die Änderungen wieder den
+            # richtigen Zeilen zuzuordnen - für den Nutzer aber unnötig,
+            # daher ausgeblendet statt entfernt.
+            "track_id": None,
+            "Track": st.column_config.TextColumn("Track", required=True),
+        },
     )
+
+    # Nur die tatsächlich geänderten Titel schreiben (statt bei jedem Klick
+    # alle Zeilen zu aktualisieren).
+    changed = {
+        row.track_id: row.Track
+        for row in edited_df.itertuples(index=False)
+        if row.Track != display_df.loc[display_df["track_id"] == row.track_id, "Track"].iloc[0]
+    }
+    if st.button(
+        f"Titel speichern ({len(changed)})",
+        disabled=not changed,
+        key="track_overview_save",
+    ):
+        rename_tracks(changed)
+        st.success(f"{len(changed)} Titel gespeichert.")
+        st.rerun()
 
 
 def _render_tracks_tab() -> None:
@@ -319,6 +426,29 @@ def _render_tour_edit_form() -> None:
             col_save, col_delete = st.columns(2)
             save = col_save.form_submit_button("Speichern", width="stretch")
             delete = col_delete.form_submit_button("Löschen", width="stretch")
+
+        # Alle Tracks der Tour als EINE zusammenhängende GPX-Datei (ein
+        # <trk> mit einem <trkseg> je Etappe). Bewusst ausserhalb des
+        # Formulars: st.download_button ist innerhalb von st.form nicht
+        # zulässig. st.download_button braucht die Daten bereits beim
+        # Rendern, der Export wird daher hier direkt erzeugt - bei den
+        # üblichen Tourgrößen ist das unkritisch.
+        tour_gpx = export_tour_gpx(selected_id)
+        if tour_gpx is None:
+            st.caption("Diese Tour enthält noch keine Tracks – kein Export möglich.")
+        else:
+            st.download_button(
+                "⬇️ Tour als GPX exportieren",
+                data=tour_gpx,
+                file_name=f"{selected_title}.gpx".replace("/", "_"),
+                mime="application/gpx+xml",
+                key=f"tour_download_{selected_id}",
+                width="stretch",
+                help=(
+                    "Alle Tracks dieser Tour in einer Datei, zeitlich "
+                    "sortiert und je Etappe als eigenes Segment."
+                ),
+            )
 
         if save:
             update_tour(selected_id, new_title)

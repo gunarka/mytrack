@@ -31,6 +31,8 @@ import uuid
 
 import duckdb
 import geopandas as gpd
+import gpxpy
+import gpxpy.gpx
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -49,6 +51,22 @@ DB_PATH = ".data/tracks.duckdb"
 # ohne dass diese Standardwerte selbst verändert werden.
 DEFAULT_MIN_SPEED_MOVING_KMH = 1.0
 DEFAULT_MIN_ELEVATION_CHANGE_M = 2.0
+
+# Breite des gleitenden Mittelwerts (in Trackpunkten), mit dem die Höhe vor
+# der Auf-/Abstiegsberechnung geglättet werden kann - Alternative bzw.
+# Ergänzung zum Schwellwertverfahren (siehe compute_ascent_descent).
+# 0 = keine Glättung (bisheriges Verhalten, bleibt Standard).
+DEFAULT_ELEVATION_SMOOTHING_WINDOW = 0
+
+# Standard-Distanzen für die Bestzeiten-Auswertung innerhalb eines Tracks
+# (siehe compute_best_efforts): (Bezeichnung, Distanz in Metern).
+BEST_EFFORT_DISTANCES = [
+    ("1 km", 1_000.0),
+    ("5 km", 5_000.0),
+    ("10 km", 10_000.0),
+    ("Halbmarathon", 21_097.5),
+    ("Marathon", 42_195.0),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -327,10 +345,35 @@ def _resolve_gps_accuracy_series(gdf: gpd.GeoDataFrame) -> pd.Series | None:
     return None
 
 
+def smooth_elevation(gdf: gpd.GeoDataFrame, window: int) -> pd.Series:
+    """
+    Glättet die Höhenspur mit einem zentrierten gleitenden Mittelwert über
+    'window' Trackpunkte.
+
+    Alternative zum Schwellwertverfahren (siehe compute_ascent_descent):
+    Das Schwellwertverfahren verwirft Höhenänderungen unterhalb eines
+    festen Betrags und unterschätzt dadurch gleichmäßige, flache Anstiege.
+    Die Glättung mittelt das Rauschen stattdessen weg und erhält den
+    langsamen Trend - bei barometrisch aufgezeichneten Höhen (Sportuhren,
+    Radcomputer) liefert das meist die realistischeren Werte. Beide
+    Verfahren lassen sich auch kombinieren (erst glätten, dann mit einem
+    kleinen Restschwellwert summieren).
+
+    window <= 1 gibt die Höhe unverändert zurück. Am Anfang und Ende des
+    Tracks wird über weniger Punkte gemittelt (min_periods=1), statt dort
+    NaN zu erzeugen.
+    """
+    ele = gdf["ele"].astype(float)
+    if window is None or window <= 1:
+        return ele
+    return ele.rolling(window=int(window), center=True, min_periods=1).mean()
+
+
 def compute_ascent_descent(
     gdf: gpd.GeoDataFrame,
     min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
     use_gps_accuracy: bool = True,
+    smoothing_window: int = DEFAULT_ELEVATION_SMOOTHING_WINDOW,
 ) -> tuple[float, float]:
     """
     Berechnet Auf- und Abstieg über ein Schwellwert-Verfahren mit
@@ -353,11 +396,17 @@ def compute_ascent_descent(
     keine Genauigkeit gespeichert (häufig der Fall, z.B. bei vielen Handy-
     Apps), wird durchgehend der feste Schwellwert verwendet.
 
+    Ist 'smoothing_window' > 1, wird die Höhe vorab mit einem gleitenden
+    Mittelwert über so viele Punkte geglättet (siehe smooth_elevation).
+    Mit 'min_elevation_change_m = 0' entsteht daraus das reine
+    Glättungsverfahren, mit 'smoothing_window = 0' das reine
+    Schwellwertverfahren.
+
     Gibt (ascent_m, descent_m) zurück - descent_m als NEGATIVER Wert,
     passend zur bestehenden Konvention der Tabelle 'gpx'
     (track_descent_m).
     """
-    ele = gdf["ele"].to_numpy(dtype=float)
+    ele = smooth_elevation(gdf, smoothing_window).to_numpy(dtype=float)
     n = len(ele)
     if n == 0 or np.isnan(ele[0]):
         return 0.0, 0.0
@@ -417,6 +466,7 @@ def summarize_track(
     min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
     min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
     use_gps_accuracy: bool = True,
+    smoothing_window: int = DEFAULT_ELEVATION_SMOOTHING_WINDOW,
 ) -> dict:
     """
     Fasst ein verarbeitetes Track-DataFrame (siehe process_gpx_dataframe)
@@ -431,7 +481,10 @@ def summarize_track(
     übrigen Kennzahlen hängen nicht von diesen Schwellwerten ab.
     """
     ascent_m, descent_m = compute_ascent_descent(
-        gdf, min_elevation_change_m, use_gps_accuracy=use_gps_accuracy
+        gdf,
+        min_elevation_change_m,
+        use_gps_accuracy=use_gps_accuracy,
+        smoothing_window=smoothing_window,
     )
     return {
         "track_time_s": gdf.iloc[-1]["time_passed"].total_seconds(),
@@ -450,6 +503,149 @@ def summarize_track(
         "location_lon_min": float(gdf["lon"].min()),
         "location_lon_max": float(gdf["lon"].max()),
     }
+
+
+# ---------------------------------------------------------------------------
+# Bestzeiten innerhalb eines Tracks
+# ---------------------------------------------------------------------------
+def compute_best_efforts(
+    gdf: pd.DataFrame,
+    distances: list[tuple[str, float]] | None = None,
+) -> pd.DataFrame:
+    """
+    Sucht je Zieldistanz den SCHNELLSTEN zusammenhängenden Abschnitt
+    innerhalb eines Tracks ("Bestleistung" nach Strava-Prinzip): Für 1 km,
+    5 km, ... wird über alle möglichen Startpunkte hinweg das Zeitfenster
+    gesucht, in dem diese Distanz am schnellsten zurückgelegt wurde - nicht
+    nur ab Kilometer 0, sondern an jeder Stelle des Tracks.
+
+    Grundlage sind die bereits in process_gpx_dataframe() berechneten
+    kumulierten Spalten 'distance' (Meter) und 'time_passed' (Zeit seit
+    Trackstart); es ist also keine erneute Geo-Berechnung nötig.
+
+    Verfahren: ein Zwei-Zeiger-Durchlauf je Zieldistanz. Der hintere Zeiger
+    'j' läuft über alle Punkte, der vordere Zeiger 'i' wird so weit
+    nachgezogen, wie der Abschnitt dabei noch mindestens die Zieldistanz
+    behält - das ist linear in der Punktzahl statt quadratisch.
+
+    Distanzen, die länger sind als der Track selbst, werden übersprungen.
+    Gibt ein DataFrame mit den Spalten 'label', 'distance_m', 'time_s',
+    'speed_kmh' und 'start_km' (Position im Track) zurück - leer, wenn
+    keine Auswertung möglich ist (z.B. GPX ohne Zeitstempel).
+    """
+    if distances is None:
+        distances = BEST_EFFORT_DISTANCES
+
+    columns = ["label", "distance_m", "time_s", "speed_kmh", "start_km"]
+    if "time_passed" not in gdf.columns or gdf.empty:
+        return pd.DataFrame(columns=columns)
+
+    dist = gdf["distance"].to_numpy(dtype=float)
+    seconds = gdf["time_passed"].dt.total_seconds().to_numpy(dtype=float)
+    valid = ~(np.isnan(dist) | np.isnan(seconds))
+    dist, seconds = dist[valid], seconds[valid]
+    if len(dist) < 2:
+        return pd.DataFrame(columns=columns)
+
+    # Auf den Trackanfang normieren, damit 'start_km' unabhängig davon ist,
+    # ob 'distance' bei 0 beginnt (im Mehrtrack-Profil der Kartenseite läuft
+    # die Distanz über mehrere Tracks hinweg weiter).
+    offset = dist[0]
+    dist = dist - offset
+    total_distance = dist[-1]
+
+    rows = []
+    for label, target_m in distances:
+        if total_distance < target_m:
+            continue
+        best_time = None
+        best_start = 0.0
+        i = 0
+        for j in range(1, len(dist)):
+            while i + 1 <= j and dist[j] - dist[i + 1] >= target_m:
+                i += 1
+            if dist[j] - dist[i] >= target_m:
+                elapsed = seconds[j] - seconds[i]
+                if elapsed > 0 and (best_time is None or elapsed < best_time):
+                    best_time = elapsed
+                    best_start = dist[i]
+        if best_time is not None:
+            rows.append({
+                "label": label,
+                "distance_m": target_m,
+                "time_s": best_time,
+                "speed_kmh": target_m / best_time * 3.6,
+                "start_km": best_start / 1000,
+            })
+    return pd.DataFrame(rows, columns=columns)
+
+
+# ---------------------------------------------------------------------------
+# GPX-Export
+# ---------------------------------------------------------------------------
+def get_track_file(track_id: str) -> tuple[str, bytes] | None:
+    """
+    Liefert die ursprünglich hochgeladene GPX-Datei eines Tracks als
+    (Dateiname, Bytes) - für den Download-Knopf in der Verwaltung. Gibt
+    None zurück, falls der Track nicht existiert.
+    """
+    con = get_connection()
+    row = con.execute(
+        "SELECT file_name, file_data FROM gpx WHERE track_id = ?", [track_id]
+    ).fetchone()
+    if row is None:
+        return None
+    file_name = row[0] or f"{track_id}.gpx"
+    if not file_name.lower().endswith(".gpx"):
+        file_name = f"{file_name}.gpx"
+    return file_name, bytes(row[1])
+
+
+def export_tour_gpx(tour_id: str) -> bytes | None:
+    """
+    Fasst alle Tracks EINER Tour zu einer einzigen GPX-Datei zusammen -
+    z.B. um eine über mehrere Tage aufgezeichnete Mehrtagestour am Stück an
+    ein Navigationsgerät oder ein anderes Programm zu übergeben.
+
+    Aufbau der Datei: EIN <trk> mit je einem <trkseg> pro Ausgangstrack, in
+    zeitlicher Reihenfolge. Die Aufteilung in Segmente ist wichtig - würden
+    alle Punkte in ein einziges Segment geschrieben, würden Auswerter die
+    Lücke zwischen zwei Etappen (z.B. die Nacht dazwischen) als
+    durchgehende Bewegung interpretieren und Luftlinien quer über die Karte
+    zeichnen.
+
+    Die Rohpunkte werden dabei unverändert aus den gespeicherten
+    GPX-Dateien übernommen (inkl. Höhe und Zeitstempel). Gibt None zurück,
+    wenn die Tour keine Tracks enthält.
+    """
+    con = get_connection()
+    rows = con.execute(
+        """
+        SELECT track_title, file_data
+        FROM gpx
+        WHERE tour_id = ?
+        ORDER BY time_start NULLS LAST
+        """,
+        [tour_id],
+    ).fetchall()
+    if not rows:
+        return None
+
+    tour_title = con.execute(
+        "SELECT tour_title FROM tours WHERE tour_id = ?", [tour_id]
+    ).fetchone()
+    name = (tour_title[0] if tour_title else None) or "Tour"
+
+    merged = gpxpy.gpx.GPX()
+    track = gpxpy.gpx.GPXTrack(name=name)
+    merged.tracks.append(track)
+    for track_title, file_data in rows:
+        source = gpxpy.parse(bytes(file_data).decode("utf-8", errors="replace"))
+        for source_track in source.tracks:
+            for segment in source_track.segments:
+                if segment.points:
+                    track.segments.append(segment)
+    return merged.to_xml().encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +718,7 @@ def process_and_build_track(
     min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
     min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
     use_gps_accuracy: bool = True,
+    smoothing_window: int = DEFAULT_ELEVATION_SMOOTHING_WINDOW,
 ) -> dict:
     """
     Komplette Verarbeitung einer neu hochgeladenen GPX-Datei für den
@@ -560,6 +757,7 @@ def process_and_build_track(
         min_speed_moving_kmh=min_speed_moving_kmh,
         min_elevation_change_m=min_elevation_change_m,
         use_gps_accuracy=use_gps_accuracy,
+        smoothing_window=smoothing_window,
     )
 
     return {
@@ -849,6 +1047,55 @@ def load_track_files(track_ids: tuple) -> pd.DataFrame:
     return con.execute(query, list(track_ids)).fetchdf()
 
 
+@st.cache_data(show_spinner="Heatmap wird aufgebaut …")
+def load_heatmap_points(stride: int = 10) -> list[list[float]]:
+    """
+    Liefert die Koordinaten ALLER gespeicherten Tracks als flache Liste
+    [[lat, lon], ...] für die Heatmap auf der Statistik-Seite.
+
+    'stride' dünnt die Punkte aus (jeder n-te Punkt): Eine Heatmap über
+    Hunderte Tracks mit je mehreren tausend Punkten wäre sonst sowohl in
+    der Übertragung als auch im Browser unnötig schwer - für die Aussage
+    "wo war ich unterwegs" ändert ein ausgedünnter Track das Bild nicht.
+
+    Gelesen wird direkt mit gpxpy statt über process_gpx_dataframe(), da
+    hier nur lat/lon gebraucht werden und die vollständige GeoPandas-
+    Aufbereitung (Umprojektion, Tempo, Steigung) dafür zu teuer wäre.
+    """
+    con = get_connection()
+    rows = con.sql("SELECT file_data FROM gpx").fetchall()
+
+    points: list[list[float]] = []
+    step = max(1, int(stride))
+    for (file_data,) in rows:
+        try:
+            gpx = gpxpy.parse(bytes(file_data).decode("utf-8", errors="replace"))
+        except Exception:
+            continue  # beschädigte Datei überspringen statt die Seite abzubrechen
+        for track in gpx.tracks:
+            for segment in track.segments:
+                for point in segment.points[::step]:
+                    points.append([point.latitude, point.longitude])
+    return points
+
+
+def rename_tracks(titles: dict) -> int:
+    """
+    Benennt mehrere Tracks auf einmal um (track_id -> neuer Titel) - für
+    das direkte Bearbeiten in der Übersichtstabelle der Verwaltung
+    (st.data_editor). Gibt die Anzahl der geänderten Tracks zurück.
+    """
+    con = get_connection()
+    for track_id, track_title in titles.items():
+        con.execute(
+            "UPDATE gpx SET track_title = ? WHERE track_id = ?",
+            [track_title, track_id],
+        )
+    if titles:
+        _invalidate_track_caches()
+    return len(titles)
+
+
 def _invalidate_track_caches() -> None:
     """
     Leert die Lese-Caches der Kartenseite. Wird von allen schreibenden
@@ -860,6 +1107,7 @@ def _invalidate_track_caches() -> None:
     """
     load_metadata.clear()
     load_track_files.clear()
+    load_heatmap_points.clear()
 
 
 def insert_track(data: dict) -> None:
@@ -1005,6 +1253,7 @@ def recalculate_track_metadata(
     min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
     min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
     use_gps_accuracy: bool = True,
+    smoothing_window: int = DEFAULT_ELEVATION_SMOOTHING_WINDOW,
 ) -> None:
     """
     Berechnet 'Zeit in Bewegung' sowie Auf-/Abstieg EINES bestehenden
@@ -1022,7 +1271,10 @@ def recalculate_track_metadata(
 
     gdf = process_gpx_dataframe(row[0])
     ascent_m, descent_m = compute_ascent_descent(
-        gdf, min_elevation_change_m, use_gps_accuracy=use_gps_accuracy
+        gdf,
+        min_elevation_change_m,
+        use_gps_accuracy=use_gps_accuracy,
+        smoothing_window=smoothing_window,
     )
     moving_s = compute_moving_time_s(gdf, min_speed_moving_kmh)
 
@@ -1041,6 +1293,7 @@ def recalculate_all_tracks_metadata(
     min_speed_moving_kmh: float = DEFAULT_MIN_SPEED_MOVING_KMH,
     min_elevation_change_m: float = DEFAULT_MIN_ELEVATION_CHANGE_M,
     use_gps_accuracy: bool = True,
+    smoothing_window: int = DEFAULT_ELEVATION_SMOOTHING_WINDOW,
 ) -> int:
     """
     Wie recalculate_track_metadata(), aber für ALLE vorhandenen Tracks auf
@@ -1055,6 +1308,7 @@ def recalculate_all_tracks_metadata(
             min_speed_moving_kmh=min_speed_moving_kmh,
             min_elevation_change_m=min_elevation_change_m,
             use_gps_accuracy=use_gps_accuracy,
+            smoothing_window=smoothing_window,
         )
     return len(track_ids)
 

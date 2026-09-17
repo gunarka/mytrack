@@ -12,13 +12,15 @@ Sie übernimmt drei Aufgaben:
        als allererster Streamlit-Befehl im gesamten Programm ausgeführt
        werden, daher steht sie hier statt in map.py/admin.py.
     2. Titel und Beschreibung in der Seitenleiste, sichtbar auf jeder Seite.
-    3. Seitenleisten-Navigation, über die zwischen "Karte" (map.py) und
-       "Verwaltung" (admin.py) gewechselt werden kann - zusammen mit den
+    3. Seitenleisten-Navigation, über die zwischen "Karte" (map.py),
+       "Statistik" (stats.py) und "Verwaltung" (admin.py) gewechselt
+       werden kann - zusammen mit den
        Anzeigeeinstellungen der Kartenseite (Farbauswahl, Spaltenbreite,
        Höhe von Karte/Profil) in einem gemeinsamen, einklappbaren Bereich
        der Seitenleiste (siehe 'settings_expander' weiter unten).
 
-admin.py und map.py enthalten dazu jeweils eine render_*_page()-Funktion
+map.py, stats.py und admin.py enthalten dazu jeweils eine
+render_*_page()-Funktion
 mit dem kompletten Seiteninhalt; app.py registriert diese Funktionen nur
 noch als Streamlit-"Pages" und ruft die ausgewählte Seite auf. Die
 eigentliche fachliche Logik (Datenbank, GPX-Verarbeitung, Geocoding) liegt
@@ -31,6 +33,7 @@ import streamlit as st
 
 from admin import render_admin_page
 from map import render_map_page
+from stats import render_stats_page
 
 # Muss als allererster Streamlit-Befehl der gesamten App stehen.
 st.set_page_config(
@@ -141,6 +144,12 @@ pages = [
         icon="🗺️",
         url_path="karte",
         default=True,
+    ),
+    st.Page(
+        render_stats_page,
+        title="Statistik",
+        icon="📊",
+        url_path="statistik",
     ),
     st.Page(
         render_admin_page,

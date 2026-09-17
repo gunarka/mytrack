@@ -77,6 +77,7 @@ from functions import (
     DEFAULT_MIN_ELEVATION_CHANGE_M,
     DEFAULT_MIN_SPEED_MOVING_KMH,
     compute_ascent_descent,
+    compute_best_efforts,
     compute_moving_time_s,
     load_metadata,
     load_track_files,
@@ -366,6 +367,32 @@ def _format_meters(value: float) -> str:
     return f"{value:,.0f} m"
 
 
+def _format_speed(km_per_h: float) -> str:
+    """Formatiert eine Geschwindigkeit, z.B. '12.3 km/h'."""
+    if pd.isna(km_per_h) or np.isinf(km_per_h):
+        return "–"
+    return f"{km_per_h:,.1f} km/h"
+
+
+def _safe_speed_kmh(distance_m, seconds):
+    """
+    Durchschnittstempo in km/h aus Strecke und Zeit - arbeitet sowohl mit
+    einzelnen Werten (Summe über alle Tracks) als auch mit pandas-Serien
+    (Einzelwerte je Track). Eine Dauer von 0 oder fehlende Werte ergeben
+    NaN statt einer Division durch 0 bzw. "inf".
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        speed = (
+            np.asarray(distance_m, dtype=float)
+            / np.asarray(seconds, dtype=float)
+            * 3.6
+        )
+    speed = np.where(np.isfinite(speed), speed, np.nan)
+    if np.ndim(speed) == 0:
+        return float(speed)
+    return pd.Series(speed, index=getattr(distance_m, "index", None))
+
+
 # --------------------------------------------------------------------------
 # Hover-Kennzahlen je Punkt (Karte + Höhenprofil)
 # --------------------------------------------------------------------------
@@ -445,12 +472,34 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
 
     descent_abs = df["track_descent_m"].abs()
 
+    # Abgeleitete Kennzahlen. Die Gesamtwerte werden aus den SUMMEN
+    # gebildet (Gesamtstrecke / Gesamtzeit), nicht als Mittelwert der
+    # Einzel-Durchschnitte - sonst zählte ein 2-km-Track genauso viel wie
+    # ein 60-km-Track.
+    total_distance = df["track_distance_m"].sum()
+    total_time = df["track_time_s"].sum()
+    total_moving = df["track_time_moving_s"].sum()
+    pause_per_track = df["track_time_s"] - df["track_time_moving_s"]
+
     # (Label, Summen-/Aggregatwert über alle Tracks, Formatierfunktion,
     # Werte je einzelnem Track in derselben Reihenfolge wie df)
     kpi_rows = [
-        ("Länge", df["track_distance_m"].sum(), _format_distance_km, df["track_distance_m"]),
-        ("Zeit", df["track_time_s"].sum(), _format_duration, df["track_time_s"]),
-        ("Zeit in Bewegung", df["track_time_moving_s"].sum(), _format_duration, df["track_time_moving_s"]),
+        ("Länge", total_distance, _format_distance_km, df["track_distance_m"]),
+        ("Zeit", total_time, _format_duration, df["track_time_s"]),
+        ("Zeit in Bewegung", total_moving, _format_duration, df["track_time_moving_s"]),
+        ("Pause", total_time - total_moving, _format_duration, pause_per_track),
+        (
+            "Ø Tempo",
+            _safe_speed_kmh(total_distance, total_time),
+            _format_speed,
+            _safe_speed_kmh(df["track_distance_m"], df["track_time_s"]),
+        ),
+        (
+            "Ø Tempo in Bewegung",
+            _safe_speed_kmh(total_distance, total_moving),
+            _format_speed,
+            _safe_speed_kmh(df["track_distance_m"], df["track_time_moving_s"]),
+        ),
         ("Aufstieg", df["track_ascent_m"].sum(), _format_meters, df["track_ascent_m"]),
         ("Abstieg", descent_abs.sum(), _format_meters, descent_abs),
         ("Min. Höhe", df["elevation_min"].min(), _format_meters, df["elevation_min"]),
@@ -467,6 +516,36 @@ def _render_kpis(df: pd.DataFrame, subheader: str = "Kennzahlen") -> None:
         with col_tracks:
             for title, value in zip(df["track_title"], per_track_values):
                 st.caption(f"{title}: {formatter(value)}")
+
+
+def _render_best_efforts(gdf: pd.DataFrame) -> None:
+    """
+    Zeigt die Bestzeiten innerhalb EINES Tracks (siehe
+    functions.compute_best_efforts): je Standarddistanz (1 km, 5 km, ...)
+    der schnellste Abschnitt irgendwo im Track, mit Tempo und der Stelle,
+    an der dieser Abschnitt beginnt.
+
+    Wird nur angezeigt, wenn genau ein Track ausgewählt ist - über mehrere
+    Tracks hinweg wäre eine "Bestzeit" nicht sinnvoll definiert, da die
+    Abschnitte dann quer über getrennte Aufzeichnungen laufen würden.
+    """
+    efforts = compute_best_efforts(gdf)
+    with st.expander("🏅 Bestzeiten", expanded=False):
+        if efforts.empty:
+            st.caption(
+                "Keine Auswertung möglich - der Track ist kürzer als 1 km "
+                "oder enthält keine Zeitstempel."
+            )
+            return
+        for row in efforts.itertuples(index=False):
+            st.metric(
+                row.label,
+                _format_duration(row.time_s),
+                help=f"Schnellste {row.label} dieses Tracks",
+            )
+            st.caption(
+                f"{_format_speed(row.speed_kmh)} · ab km {row.start_km:.1f}"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1501,13 +1580,14 @@ def render_map_page(settings_container=None) -> None:
     # noch ändern sollte.
     planning_active = bool(st.session_state.get("planning_mode")) and len(df) == 1
 
-    # Im Planungsmodus wird der (einzige) Track HIER schon einmal
-    # verarbeitet und sowohl an die Kennzahlen-Spalte als auch an
-    # _render_map_and_profile() weitergereicht, damit process_track()
-    # nicht zweimal pro Seitenaufruf für denselben Track läuft (siehe
-    # _render_map_and_profile, Parameter 'track_store_seed').
+    # Ist genau EIN Track ausgewählt, wird er HIER schon einmal verarbeitet
+    # und sowohl an die Kennzahlen-Spalte (Bestzeiten bzw. Kennzahlen je
+    # Teil im Planungsmodus) als auch an _render_map_and_profile()
+    # weitergereicht, damit process_track() nicht zweimal pro Seitenaufruf
+    # für denselben Track läuft (siehe _render_map_and_profile, Parameter
+    # 'track_store_seed').
     precomputed_track_store = None
-    if planning_active:
+    if len(df) == 1:
         track_id = df["track_id"].iloc[0]
         precomputed_track_store = {track_id: process_track(track_id, df["file_data"].iloc[0])}
 
@@ -1536,6 +1616,13 @@ def render_map_page(settings_container=None) -> None:
                 )
             else:
                 _render_kpis(df)
+            # Bestzeiten nur bei genau einem Track (siehe
+            # _render_best_efforts).
+            if precomputed_track_store is not None:
+                st.divider()
+                _render_best_efforts(
+                    precomputed_track_store[df["track_id"].iloc[0]]
+                )
 
     with col_map:
         with st.container(border=True):
