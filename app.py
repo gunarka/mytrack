@@ -18,6 +18,9 @@ Sie übernimmt drei Aufgaben:
        Anzeigeeinstellungen der Kartenseite (Farbauswahl, Spaltenbreite,
        Höhe von Karte/Profil) in einem gemeinsamen, einklappbaren Bereich
        der Seitenleiste (siehe 'settings_expander' weiter unten).
+    4. "Beenden"-Knopf am unteren Rand der Seitenleiste: trennt nach einer
+       Sicherheitsabfrage die Datenbankverbindung und beendet den
+       Streamlit-Prozess im Terminal (siehe functions.shutdown_app()).
 
 map.py, stats.py und admin.py enthalten dazu jeweils eine
 render_*_page()-Funktion
@@ -32,6 +35,7 @@ import functools
 import streamlit as st
 
 from admin import render_admin_page
+from functions import shutdown_app
 from map import render_map_page
 from map_linked import render_linked_map_page
 from stats import render_stats_page
@@ -174,4 +178,53 @@ with settings_expander:
         st.page_link(page)
     st.divider()
 
+
+def _render_shutdown_screen() -> None:
+    """
+    Abschiedsseite nach Bestätigung des "Beenden"-Knopfs.
+
+    Wird ANSTELLE der regulären Seite gerendert (kein navigation.run()),
+    damit beim Herunterfahren keine Datenbankabfrage mehr startet, deren
+    Verbindung gerade geschlossen wird. Erst danach wird shutdown_app()
+    aufgerufen: Es trennt die Datenbank sofort und beendet den Prozess kurz
+    verzögert im Hintergrund, sodass diese Seite den Browser noch erreicht.
+    """
+    st.title("🗺️ MyTrack")
+    st.success("Anwendung beendet. Die Datenbankverbindung wurde getrennt.")
+    st.caption(
+        "Dieses Browser-Fenster kann geschlossen werden. "
+        "Neustart im Terminal mit: streamlit run app.py"
+    )
+    shutdown_app()
+
+
+if st.session_state.get("_shutdown_requested"):
+    _render_shutdown_screen()
+    st.stop()
+
 navigation.run()
+
+# Beenden-Knopf ganz unten in der Seitenleiste - bewusst NACH
+# navigation.run(), damit er unterhalb der von den Seitenmodulen
+# eingehängten Filter erscheint und nicht zwischen ihnen verschwindet.
+# Zweistufig (Knopf -> Sicherheitsabfrage), weil ein versehentlicher Klick
+# sonst laufende Uploads oder ungespeicherte Formulareingaben verwirft.
+with st.sidebar:
+    st.divider()
+    if st.session_state.get("_confirm_quit"):
+        st.warning("Anwendung wirklich beenden?")
+        col_yes, col_no = st.columns(2)
+        if col_yes.button("Ja, beenden", type="primary", width="stretch"):
+            st.session_state["_confirm_quit"] = False
+            st.session_state["_shutdown_requested"] = True
+            st.rerun()
+        if col_no.button("Abbrechen", width="stretch"):
+            st.session_state["_confirm_quit"] = False
+            st.rerun()
+    elif st.button(
+        "🚪 Beenden",
+        width="stretch",
+        help="Datenbankverbindung trennen und den Streamlit-Prozess beenden",
+    ):
+        st.session_state["_confirm_quit"] = True
+        st.rerun()

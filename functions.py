@@ -27,6 +27,9 @@ import datetime
 import io
 import json
 import os
+import signal
+import threading
+import time
 import uuid
 
 import duckdb
@@ -124,6 +127,67 @@ def _ensure_schema_migrations(con: duckdb.DuckDBPyConnection) -> None:
     }
     if "track_time_moving_s" not in existing_columns:
         con.execute("ALTER TABLE gpx ADD COLUMN track_time_moving_s DOUBLE")
+
+
+def close_connection() -> None:
+    """
+    Schliesst die DuckDB-Verbindung und leert den Ressourcen-Cache.
+
+    Gegenstück zu get_connection() und die EINZIGE Stelle, an der die
+    Verbindung geschlossen werden darf (siehe Hinweis dort): Sie wird nur
+    beim geordneten Beenden der App über den "Beenden"-Knopf in der
+    Seitenleiste (app.py) aufgerufen. Erst dadurch gibt DuckDB die
+    Schreibsperre auf die Datei '.data/tracks.duckdb' wieder frei - sonst
+    könnte ein direkt anschliessender Start von init.py oder ein zweiter
+    App-Start die Datenbank nicht öffnen.
+
+    get_connection.clear() entfernt zusätzlich den zwischengespeicherten
+    (jetzt geschlossenen) Verbindungs-Handle aus dem Streamlit-Cache, damit
+    nachfolgender Code nicht versehentlich auf eine tote Verbindung trifft.
+    Fehler werden bewusst verschluckt: Ein Beenden darf nie an einer
+    bereits geschlossenen oder nie geöffneten Verbindung scheitern.
+    """
+    try:
+        con = get_connection()
+        con.close()
+    except Exception:
+        pass
+    try:
+        get_connection.clear()
+    except Exception:
+        pass
+
+
+def shutdown_app(delay_s: float = 1.5) -> None:
+    """
+    Beendet die Anwendung vollständig: Datenbank trennen und den
+    Streamlit-Serverprozess (das Terminal, in dem 'streamlit run app.py'
+    läuft) stoppen.
+
+    Der eigentliche Abschuss läuft in einem Hintergrund-Thread mit kurzer
+    Verzögerung ('delay_s'), damit Streamlit die zuletzt gerenderte Seite
+    ("Anwendung beendet") noch an den Browser ausliefern kann - würde der
+    Prozess sofort sterben, sähe der Nutzer nur einen Verbindungsfehler.
+
+    SIGTERM gibt Streamlit die Gelegenheit, sich selbst geordnet
+    herunterzufahren; greift das nicht (z.B. unter Windows, wo SIGTERM nur
+    eingeschränkt unterstützt wird), erzwingt os._exit() das Ende. os._exit
+    umgeht bewusst jegliches Aufräumen der Laufzeitumgebung, weil an dieser
+    Stelle alles Wichtige - die Datenbankverbindung - bereits geschlossen
+    ist.
+    """
+    close_connection()
+
+    def _terminate() -> None:
+        time.sleep(delay_s)
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            pass
+        time.sleep(2.0)
+        os._exit(0)
+
+    threading.Thread(target=_terminate, daemon=True).start()
 
 
 def init_database() -> None:

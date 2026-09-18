@@ -18,7 +18,8 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 ## Dateien und Zuständigkeiten
 
 ```
-app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigation
+app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigation,
+               "Beenden"-Knopf (Abschiedsseite + functions.shutdown_app())
 ├── map.py     Seite "Karte"      -> render_map_page(settings_container=None)
 │              zusätzlich: render_track_filters() - Sidebar-Filter, von
 │              beiden Kartenseiten genutzt
@@ -76,7 +77,7 @@ Verbindungsaufbau). Bestandsdatenbanken dürfen nicht auf
 
 | Funktion | Cache | Inhalt |
 |---|---|---|
-| `get_connection()` | `cache_resource` | DuckDB-Verbindung als Singleton |
+| `get_connection()` | `cache_resource` | DuckDB-Verbindung als Singleton (geschlossen nur via `close_connection()`) |
 | `process_track()` | `cache_data` | Aufbereitete Trackpunkte je `track_id` |
 | `load_metadata()` | `cache_data` | Kennzahlen aller Tracks für Karte/Statistik |
 | `load_track_files()` | `cache_data` | GPX-Blobs der ausgewählten Tracks |
@@ -88,7 +89,8 @@ Wer eine neue Schreiboperation ergänzt, muss das ebenfalls tun – sonst
 zeigen Karte und Statistik veraltete Daten.
 
 DuckDB erlaubt nur **eine** schreibende Verbindung je Datei: `app.py` und
-`init.py` nie gleichzeitig laufen lassen.
+`init.py` nie gleichzeitig laufen lassen. Der "Beenden"-Knopf ruft
+`close_connection()` auf und gibt die Datei damit wieder frei.
 
 ## Zustand (`st.session_state`)
 
@@ -106,6 +108,8 @@ führendem Unterstrich.
   Seite "Karte" geteilt, damit die Auswahl beim Seitenwechsel steht)
 - Planung: `planning_mode`, `split_points`, `_last_planning_click`,
   `_last_planning_map_click`, `_last_track_ids`
+- Beenden: `_confirm_quit` (Sicherheitsabfrage sichtbar),
+  `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
 
 Die Track-Checkboxen werden bewusst persistent gehalten, damit die Auswahl
 Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
@@ -135,6 +139,7 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Neue Auswertung | `stats.py` (`_render_*`), Daten über `load_metadata()` |
 | Neue Verwaltungsfunktion | Formular in `admin.py`, Schreiblogik in `functions.py` |
 | Neue Seite | Modul mit `render_*_page()` + Eintrag in `pages` in `app.py` |
+| Verhalten beim Beenden | `shutdown_app()`/`close_connection()` in `functions.py`, UI-Teil am Ende von `app.py` |
 | Filter der Kartenseiten | `render_track_filters()` in `map.py` (wirkt auf beide Karten) |
 | Interaktion Karte/Profil ohne Rerun | JS-Vorlage `_HTML_TEMPLATE` in `map_linked.py` |
 | Änderung am GPX-Parsing | `process_gpx_dataframe()` (pro Punkt) |
@@ -216,6 +221,12 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
   darin die Spalte `distance`; neue Module sollten die zurückgegebenen
   Frames nicht verändern (`map_linked.py` rechnet die Gesamtdistanz
   deshalb aus `dist_delta` neu).
+- Beenden: Die Abschiedsseite muss **vor** `navigation.run()` geprüft und
+  mit `st.stop()` abgeschlossen werden – sonst läuft beim Herunterfahren
+  noch eine Seite gegen die gerade geschlossene Verbindung. Der Prozess
+  wird zeitversetzt in einem Hintergrund-Thread beendet, damit die Antwort
+  den Browser noch erreicht; `get_connection()` darf sonst nirgends
+  geschlossen werden.
 
 ## Arbeitsweise
 

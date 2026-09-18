@@ -38,7 +38,9 @@ Auswahl bleibt beim Wechsel zwischen ihnen also erhalten.
 
 Die Datenbankverbindung (`functions.get_connection()`) ist über
 `st.cache_resource` als Singleton implementiert: Alle Module im selben
-Streamlit-Prozess teilen sich dieselbe DuckDB-Verbindung.
+Streamlit-Prozess teilen sich dieselbe DuckDB-Verbindung. Geschlossen wird
+sie ausschließlich beim geordneten Beenden über den Knopf "🚪 Beenden"
+(`functions.close_connection()` / `functions.shutdown_app()`).
 
 Die Leseabfragen der Kartenseite sind über `st.cache_data` gecacht. Jede
 schreibende Funktion (anlegen / ändern / löschen / neu berechnen) leert
@@ -86,6 +88,10 @@ streamlit run init.py
 # App starten
 streamlit run app.py
 ```
+
+Beendet wird die App über den Knopf **"🚪 Beenden"** am unteren Rand der
+Seitenleiste (siehe unten) – damit endet auch der `streamlit`-Prozess im
+Terminal. Alternativ `Strg+C` im Terminal.
 
 Für das Reverse-Geocoding (Ermittlung von Ort/Land aus den GPS-Koordinaten)
 wird beim Hochladen eines neuen Tracks die öffentliche
@@ -233,6 +239,20 @@ Auswertung über alle Tracks hinweg, ohne Filter:
 - Tab "Heatmap": alle aufgezeichneten Punkte als Wärmekarte – zeigt auf
   einen Blick, welche Gegenden und Strecken wie oft zurückgelegt wurden.
   Die Punkte werden ausgedünnt geladen (jeder 10.) und gecacht.
+
+### Anwendung beenden
+
+Ganz unten in der Seitenleiste liegt der Knopf **"🚪 Beenden"**. Nach einer
+Sicherheitsabfrage ("Ja, beenden" / "Abbrechen") passiert dreierlei:
+
+1. Die DuckDB-Verbindung wird geschlossen – die Datei
+   `.data/tracks.duckdb` ist danach wieder frei (z. B. für `init.py`).
+2. Es erscheint die Meldung "Anwendung beendet"; das Browser-Fenster kann
+   geschlossen werden.
+3. Der Streamlit-Prozess im Terminal wird beendet – kein `Strg+C` nötig.
+
+Laufende Uploads oder nicht gespeicherte Formulareingaben gehen dabei
+verloren; deshalb die Sicherheitsabfrage.
 
 ## Auf- und Abstieg: Schwellwert oder Glättung
 
