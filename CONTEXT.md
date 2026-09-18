@@ -10,7 +10,7 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 | | |
 |---|---|
 | Zweck | GPX-Tracks hochladen, verwalten, auf Karte/Höhenprofil ansehen, auswerten |
-| Stack | Python 3.10+, Streamlit ≥ 1.49, DuckDB, GeoPandas/gpxpy, Folium, Plotly; auf der Seite "Karte (Sync)" zusätzlich MapLibre GL JS + uPlot (per CDN im Browser) |
+| Stack | Python 3.10+, Streamlit ≥ 1.49, DuckDB, GeoPandas/gpxpy, Folium, Plotly; auf der Seite "Karte (Sync)" zusätzlich Leaflet + uPlot (per CDN im Browser) |
 | Ausführung | Lokal, Single-User, `streamlit run app.py` |
 | Daten | Lokale Datei `.data/tracks.duckdb` (nicht im Repo, siehe `.gitignore`) |
 | Sprache | Oberfläche, Kommentare, Docstrings und Commits auf **Deutsch** |
@@ -23,7 +23,7 @@ app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigatio
 │              zusätzlich: render_track_filters() - Sidebar-Filter, von
 │              beiden Kartenseiten genutzt
 ├── map_linked.py  Seite "Karte (Sync)" -> render_linked_map_page(settings_container=None)
-│              Karte + Profil als EINE HTML/JS-Komponente (MapLibre + uPlot)
+│              Karte + Profil als EINE HTML/JS-Komponente (Leaflet + uPlot)
 ├── stats.py   Seite "Statistik"  -> render_stats_page()
 └── admin.py   Seite "Verwaltung" -> render_admin_page()
 functions.py   Gesamte Fachlogik: DB, GPX, Geocoding, Kennzahlen, CRUD
@@ -154,9 +154,24 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
 - Kopplung im Browser: uPlot-Hook `setCursor` -> MapLibre-Marker;
   MapLibre-`mousemove` -> `u.setCursor()`. Der nächstgelegene Trackpunkt
   wird über einen Gitter-Index (~200-m-Zellen) gesucht, nicht linear.
-- Einfärbung: `line-gradient` (MapLibre, benötigt `lineMetrics: true`)
-  bzw. ein Canvas-Verlauf entlang der x-Achse (uPlot). Da x die Distanz
-  ist, stimmen Karten- und Profilfarbe punktgenau überein.
+- Einfärbung: Die Linie wird in 240 Abschnitte mit je einer Farbe zerlegt
+  (Leaflet-Canvas), das Profil bekommt einen Canvas-Verlauf entlang der
+  x-Achse (uPlot). Da x die Distanz ist, stimmen Karten- und Profilfarbe
+  punktgenau überein.
+- **Warum nicht MapLibre GL?** Erster Anlauf, verworfen: MapLibre braucht
+  WebGL *und* einen Web Worker (dort wird jede GeoJSON-Quelle geparst). Im
+  Streamlit-iframe kamen Basiskarte und DOM-Marker durch, die
+  GeoJSON-Linien aber nicht. Leaflet rendert im Hauptthread auf ein
+  Canvas, braucht weder WebGL noch Worker und ist über Folium in dieser
+  App erprobt.
+- **Fehler sichtbar machen:** In einem iframe sieht niemand die
+  Browser-Konsole. `window.onerror`, `unhandledrejection` und
+  Leaflets `tileerror` schreiben deshalb in einen roten Balken oben in der
+  Komponente. Beim Erweitern der JS-Vorlage diesen Weg beibehalten - sonst
+  äußert sich jeder Tippfehler wieder als leere Fläche.
+- Die Bibliotheken werden per `loadScript()` nachgeladen (nicht als
+  `<script src>` im Dokument), damit ein nicht erreichbares CDN eine
+  Meldung ergibt statt "X is not defined". Zweites CDN als Ausweichweg.
 - Die Komponente ist eine **Einbahnstraße**: kein Rückkanal nach
   Streamlit. Alles, was Serverzustand braucht (Planungsmodus,
   GPX-Export), bleibt auf der Seite "Karte". Ein Rückkanal bräuchte eine
@@ -185,6 +200,15 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
 - JSON in `<script>`: `</` muss maskiert werden (siehe
   `_component_html()`), sonst beendet ein Track-Titel mit `</script>` den
   Skriptblock.
+- `st.components.v1.html` ist seit Streamlit 1.56 abgekündigt (Ersatz:
+  `st.iframe`, erkennt HTML-Text selbst). `_render_component()` wählt
+  automatisch; der HTML-Text muss dafür mit `<` beginnen.
+- uPlot braucht sein Stylesheet, sonst liegen Achsen und Cursor nicht über
+  der Zeichenfläche und das Diagramm wirkt leer. Es ist deshalb als
+  `_UPLOT_CSS` fest eingebaut statt per CDN geladen.
+- uPlot vor dem Layout des iframes zu erzeugen ergibt Breite 0 (leeres
+  Diagramm): Der Aufbau wartet deshalb zwei Frames ab und rechnet mit
+  einer Mindestbreite.
 - In `map_linked.py` kein f-String für die HTML-Vorlage verwenden – die
   Vorlage ist voller geschweifter Klammern (JS/CSS). Platzhalter werden
   per `.replace()` ersetzt.

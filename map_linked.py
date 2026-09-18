@@ -17,8 +17,15 @@ bräuchte es aber < 16 ms.
 Diese Seite löst das, indem Karte UND Profil in derselben JavaScript-
 Laufzeit liegen:
 
-    MapLibre GL JS  (Karte, WebGL, Raster-Kacheln von OpenTopoMap/OSM)
-    uPlot           (Höhenprofil, Canvas, sehr schnell bei vielen Punkten)
+    Leaflet  (Karte, Canvas-Renderer, Raster-Kacheln von OpenTopoMap/OSM)
+    uPlot    (Höhenprofil, Canvas, sehr schnell bei vielen Punkten)
+
+Warum Leaflet und nicht MapLibre GL? MapLibre braucht WebGL UND einen Web
+Worker (jede GeoJSON-Quelle wird dort geparst). Im Streamlit-iframe kam der
+Basiskarten-Layer durch, die Track-Linien aber nicht - ein Fehlerbild, das
+genau auf diese Zusatzanforderungen zeigt. Leaflet rendert alles im
+Hauptthread auf ein Canvas, braucht weder WebGL noch Worker und ist in
+dieser App über Folium bereits erprobt.
 
 Beides wird über `st.components.v1.html()` als ein einziger iframe
 eingebettet. Streamlit liefert dabei nur einmal die Daten (JSON im HTML),
@@ -48,8 +55,14 @@ Bewusste Einschränkungen
   Rückkanal wäre eine echte bidirektionale Custom Component nötig
   (Frontend-Build) oder `streamlit-javascript`.
 - Die JS-Bibliotheken werden von einem CDN geladen (siehe _CDN_*), es wird
-  also eine Internetverbindung benötigt. Für den Offline-Betrieb lassen
-  sich die vier Dateien lokal ablegen und die Konstanten anpassen.
+  also eine Internetverbindung benötigt. Je Bibliothek sind zwei CDNs
+  hinterlegt; schlägt das erste fehl, wird das zweite versucht. Klappt
+  beides nicht, erscheint eine Meldung IN der Komponente statt einer
+  leeren Fläche.
+- Jeder Fehler im Browser (JS-Ausnahme, Kachel-/Ladefehler) wird als roter
+  Balken oben in der Komponente angezeigt - ein stilles Scheitern in der
+  Browser-Konsole, das man in Streamlit nie zu sehen bekommt, gibt es
+  damit nicht mehr.
 - Sehr große Auswahlen werden für die Übertragung ausgedünnt (siehe
   _MAX_TOTAL_POINTS), damit das eingebettete JSON klein bleibt.
 
@@ -79,14 +92,24 @@ from map import (
 )
 
 # --------------------------------------------------------------------------
-# Externe Bibliotheken (CDN, feste Versionen)
+# Externe Bibliotheken (CDN, feste Versionen, mit Ausweich-CDN)
 # --------------------------------------------------------------------------
 # Bewusst auf exakte Versionen gepinnt: Ein stiller Major-Wechsel beim CDN
-# würde die Seite sonst ohne eigenes Zutun zerlegen.
-_CDN_MAPLIBRE_JS = "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
-_CDN_MAPLIBRE_CSS = "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
-_CDN_UPLOT_JS = "https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js"
-_CDN_UPLOT_CSS = "https://unpkg.com/uplot@1.6.31/dist/uPlot.min.css"
+# würde die Seite sonst ohne eigenes Zutun zerlegen. Je Bibliothek sind zwei
+# Adressen hinterlegt - die zweite wird nur geladen, wenn die erste nicht
+# erreichbar ist (siehe Lade-Logik in der HTML-Vorlage).
+_CDN_LEAFLET_JS = [
+    "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
+    "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js",
+]
+_CDN_LEAFLET_CSS = [
+    "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css",
+    "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css",
+]
+_CDN_UPLOT_JS = [
+    "https://unpkg.com/uplot@1.6.31/dist/uPlot.iife.min.js",
+    "https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js",
+]
 
 # --------------------------------------------------------------------------
 # Hintergrundkarten (reine Raster-Kacheln, kein API-Schlüssel nötig)
@@ -152,7 +175,7 @@ def _clean(values, decimals: int) -> list:
     'decimals' Nachkommastellen, NaN/Inf werden zu None (in JSON: null).
 
     Notwendig, weil json.dumps() für NaN sonst das JavaScript-fremde
-    Literal 'NaN' schreibt und uPlot/MapLibre Lücken nur über 'null'
+    Literal 'NaN' schreibt und uPlot/Leaflet Lücken nur über 'null'
     korrekt behandeln.
     """
     arr = np.asarray(values, dtype="float64")
@@ -201,6 +224,13 @@ def _build_payload(
         idx = list(range(0, len(gdf), stride))
         if idx and idx[-1] != len(gdf) - 1:
             idx.append(len(gdf) - 1)
+        # Punkte ohne gültige Koordinate aussortieren: eine einzige NaN-Position
+        # würde die Kartenlinie und den Gitter-Index im Browser unbrauchbar
+        # machen (Leaflet zeichnet eine Linie mit NaN-Punkt gar nicht).
+        lat_all, lon_all = gdf["lat"].to_numpy(), gdf["lon"].to_numpy()
+        idx = [i for i in idx if np.isfinite(lat_all[i]) and np.isfinite(lon_all[i])]
+        if len(idx) < 2:
+            continue
         sub = gdf.iloc[idx]
 
         time_passed = sub["time_passed"]
@@ -240,7 +270,7 @@ def _build_payload(
     # Bounding-Box aller Tracks für den Startausschnitt der Karte. Fehlen
     # die gespeicherten Werte (ältere Datensätze), wird sie aus den
     # übertragenen Punkten selbst gebildet - eine Bounding-Box mit NaN
-    # würde MapLibre sonst kommentarlos eine leere Karte zeigen lassen.
+    # würde Leaflet sonst kommentarlos eine leere Karte zeigen lassen.
     lats = [v for t in tracks for v in t["lat"] if v is not None]
     lons = [v for t in tracks for v in t["lon"] if v is not None]
     bounds = [
@@ -270,17 +300,42 @@ def _build_payload(
 # --------------------------------------------------------------------------
 # HTML/JS-Vorlage der Komponente
 # --------------------------------------------------------------------------
+# Das Stylesheet von uPlot ist hier fest eingebaut (statt per CDN geladen):
+# Ohne diese Regeln liegen Achsen und Cursor nicht absolut über der
+# Zeichenfläche - das Diagramm sähe dann kaputt oder leer aus. Ein
+# fehlgeschlagener CDN-Abruf soll nicht genau dieses Bild erzeugen.
+_UPLOT_CSS = (
+    ".uplot, .uplot *, .uplot *::before, .uplot *::after {box-sizing: border-box;}"
+    ".uplot {font-family: inherit; line-height: 1.5; width: min-content;}"
+    ".u-title {text-align: center; font-size: 18px; font-weight: bold;}"
+    ".u-wrap {position: relative; user-select: none;}"
+    ".u-over, .u-under {position: absolute;}"
+    ".u-under {overflow: hidden;}"
+    ".uplot canvas {display: block; position: relative; width: 100%; height: 100%;}"
+    ".u-axis {position: absolute;}"
+    ".u-legend {display: none;}"
+    ".u-select {background: rgba(0,0,0,0.07); position: absolute; pointer-events: none;}"
+    ".u-cursor-x, .u-cursor-y {position: absolute; left: 0; top: 0; pointer-events: none;"
+    " will-change: transform;}"
+    ".u-hz .u-cursor-x, .u-vt .u-cursor-y {height: 100%; border-right: 1px dashed #607D8B;}"
+    ".u-hz .u-cursor-y, .u-vt .u-cursor-x {width: 100%; border-bottom: 1px dashed #607D8B;}"
+    ".u-cursor-pt {position: absolute; top: 0; left: 0; border-radius: 50%; border: 0 solid;"
+    " pointer-events: none; will-change: transform; background-clip: padding-box !important;}"
+    ".u-axis.u-off, .u-select.u-off, .u-cursor-x.u-off, .u-cursor-y.u-off,"
+    " .u-cursor-pt.u-off {display: none;}"
+)
+
 # Der Platzhalter __PAYLOAD__ wird in _component_html() durch das JSON
 # ersetzt. Bewusst KEIN f-String: die Vorlage enthält jede Menge geschweifte
 # Klammern (JS-Blöcke, CSS), die sonst alle verdoppelt werden müssten.
-_HTML_TEMPLATE = """
-<link rel="stylesheet" href="__CSS_MAPLIBRE__" />
-<link rel="stylesheet" href="__CSS_UPLOT__" />
-<script src="__JS_MAPLIBRE__"></script>
-<script src="__JS_UPLOT__"></script>
-<style>
+_HTML_TEMPLATE = """<style>
+  __UPLOT_CSS__
   html, body { margin: 0; padding: 0; font-family: "Source Sans Pro", system-ui, sans-serif; }
   #wrap { position: relative; }
+  #err {
+    background: #fdecea; color: #7f231c; border-bottom: 1px solid #f5c6c2;
+    padding: 6px 10px; font-size: 12px; white-space: pre-wrap;
+  }
   #readout {
     display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
     padding: 6px 10px; font-size: 13px; line-height: 1.3;
@@ -291,45 +346,109 @@ _HTML_TEMPLATE = """
   #readout .title { font-weight: 600; max-width: 260px; overflow: hidden;
                     text-overflow: ellipsis; white-space: nowrap; }
   #readout .hint { color: #888; }
-  #map { width: 100%; }
+  #map { width: 100%; background: #e8e8e8; }
   #profile { width: 100%; position: relative; }
   #legend {
-    position: absolute; right: 10px; bottom: 10px; z-index: 5;
+    position: absolute; right: 10px; bottom: 10px; z-index: 500;
     background: rgba(255,255,255,0.88); border: 1px solid #ccc; border-radius: 4px;
-    padding: 4px 6px; font-size: 11px; color: #333;
+    padding: 4px 6px; font-size: 11px; color: #333; pointer-events: none;
   }
   #legend .bar { height: 8px; width: 150px; border: 1px solid #bbb; margin: 2px 0; }
   #legend .scale { display: flex; justify-content: space-between;
                    font-variant-numeric: tabular-nums; }
-  button.reset {
-    position: absolute; right: 10px; top: 10px; z-index: 5;
+  #reset {
+    position: absolute; right: 10px; top: 6px; z-index: 600;
     background: #fff; border: 1px solid #ccc; border-radius: 4px;
     padding: 3px 8px; font-size: 12px; cursor: pointer;
   }
-  button.reset:hover { background: #f0f0f0; }
-  .pin { width: 14px; height: 14px; border-radius: 50%; background: #ff2d55;
-         border: 2px solid #fff; box-shadow: 0 0 4px rgba(0,0,0,0.5); }
-  .endpoint { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff;
-              box-shadow: 0 0 3px rgba(0,0,0,0.5); }
-  .u-legend { display: none; }  /* eigene Werte-Anzeige oben, siehe #readout */
+  #reset:hover { background: #f0f0f0; }
 </style>
 
 <div id="wrap">
-  <div id="readout"><span class="hint">Maus über Karte oder Profil bewegen …</span></div>
+  <div id="err" hidden></div>
+  <div id="readout"><span class="hint">Karte wird geladen …</span></div>
   <div id="map"></div>
-  <div id="profile"><button class="reset" id="reset">Alles zeigen</button></div>
+  <div id="profile"><button id="reset">Alles zeigen</button></div>
   <div id="legend"></div>
 </div>
 
 <script>
 const D = __PAYLOAD__;
+
+/* ---------------------------------------------------------------------
+   0. Fehler sichtbar machen.
+      In einem Streamlit-iframe bekommt man die Browser-Konsole praktisch
+      nie zu Gesicht - ein JS-Fehler äußert sich sonst nur als leere
+      Fläche. Deshalb landet JEDER Fehler als roter Balken in der
+      Komponente selbst.
+   --------------------------------------------------------------------- */
+function showError(msg) {
+  const el = document.getElementById("err");
+  el.hidden = false;
+  el.textContent = "⚠ " + msg;
+}
+window.addEventListener("error", e => showError(
+  (e.message || "Fehler") + (e.filename ? "  (" + e.filename + ":" + e.lineno + ")" : "")));
+window.addEventListener("unhandledrejection", e => showError(String(e.reason)));
+
+/* ---------------------------------------------------------------------
+   1. Bibliotheken nachladen - mit Ausweich-CDN und klarer Meldung.
+      Die Skripte werden NICHT als <script src> im Dokument eingebunden,
+      damit ein nicht erreichbares CDN nicht stillschweigend dazu führt,
+      dass der restliche Code mit "X is not defined" abbricht.
+   --------------------------------------------------------------------- */
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = url;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(url));
+    document.head.appendChild(s);
+  });
+}
+async function need(globalName, urls) {
+  if (window[globalName]) return;
+  for (const url of urls) {
+    try {
+      await loadScript(url);
+      if (window[globalName]) return;
+    } catch (e) { /* nächstes CDN versuchen */ }
+  }
+  throw new Error("Bibliothek '" + globalName + "' konnte nicht geladen werden. "
+    + "Besteht eine Internetverbindung? Versucht: " + urls.join(" , "));
+}
+function loadCss(urls) {
+  urls.forEach(url => {
+    const l = document.createElement("link");
+    l.rel = "stylesheet"; l.href = url;
+    document.head.appendChild(l);
+  });
+}
+
+(async function () {
+  try {
+    loadCss(D.cdn.leafletCss);
+    await need("L", D.cdn.leafletJs);
+    await need("uPlot", D.cdn.uplotJs);
+    /* Zwei Frames warten, damit der iframe seine endgültige Breite hat -
+       sonst bekäme uPlot beim ersten Aufbau die Breite 0. */
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    boot();
+  } catch (e) {
+    showError(e && e.message ? e.message : String(e));
+  }
+})();
+
+function boot() {
 const T = D.tracks;
 const MAPH = D.layout.mapHeight, PROFH = D.layout.profileHeight;
 document.getElementById("map").style.height = MAPH + "px";
 document.getElementById("profile").style.height = PROFH + "px";
 
+if (!T.length) { showError("Keine Trackpunkte übertragen."); return; }
+
 /* ---------------------------------------------------------------------
-   1. Flache Indizes: Alle Tracks werden zu EINER Punktfolge verkettet.
+   2. Flache Indizes: Alle Tracks werden zu EINER Punktfolge verkettet.
       owner[g] = Track-Nummer, local[g] = Punkt-Nummer innerhalb des Tracks.
       Damit lässt sich jeder Profil-Index in O(1) auf einen Kartenpunkt
       abbilden und umgekehrt.
@@ -350,7 +469,6 @@ const offset = [];
   });
 }
 
-/* Werte der Farb-Spalte je Punkt (oder null im Modus "Nichts"). */
 const COL = D.color.column;
 function attrOf(t, i) {
   if (COL === "ele") return t.ele[i];
@@ -360,22 +478,26 @@ function attrOf(t, i) {
 }
 
 /* ---------------------------------------------------------------------
-   2. Farbskala (identisch zur Folium-Seite): linear zwischen sieben
+   3. Farbskala (identisch zur Folium-Seite): linear zwischen sieben
       Stützfarben von blau nach rot.
    --------------------------------------------------------------------- */
 const RGB = D.color.ramp.map(h => [
   parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16),
 ]);
 function rampColor(v, alpha) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "rgba(130,130,130," + (alpha ?? 1) + ")";
+  const a = (alpha === null || alpha === undefined) ? 1 : alpha;
+  if (v === null || v === undefined || Number.isNaN(v)) return "rgba(130,130,130," + a + ")";
   let f = (v - D.color.vmin) / (D.color.vmax - D.color.vmin);
   f = Math.max(0, Math.min(1, f));
   const x = f * (RGB.length - 1), i = Math.min(RGB.length - 2, Math.floor(x)), r = x - i;
   const c = [0, 1, 2].map(k => Math.round(RGB[i][k] + (RGB[i + 1][k] - RGB[i][k]) * r));
-  return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + (alpha ?? 1) + ")";
+  return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a + ")";
+}
+function esc(s) {
+  return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
 
-/* Farblegende unten rechts (nur wenn nach einem Wert eingefärbt wird). */
+/* Farblegende unten rechts */
 {
   const el = document.getElementById("legend");
   if (COL === "none") {
@@ -384,84 +506,69 @@ function rampColor(v, alpha) {
       + t.color + ';margin-right:5px"></span>' + esc(t.title) + "</div>").join("");
   } else {
     const steps = [];
-    for (let i = 0; i <= 20; i++) steps.push(rampColor(D.color.vmin + (D.color.vmax - D.color.vmin) * i / 20));
-    el.innerHTML = "<div>" + D.color.label + " (" + D.color.unit + ")</div>"
+    for (let i = 0; i <= 20; i++) {
+      steps.push(rampColor(D.color.vmin + (D.color.vmax - D.color.vmin) * i / 20));
+    }
+    el.innerHTML = "<div>" + esc(D.color.label) + " (" + esc(D.color.unit) + ")</div>"
       + '<div class="bar" style="background:linear-gradient(to right,' + steps.join(",") + ')"></div>'
       + '<div class="scale"><span>' + D.color.vmin + "</span><span>" + D.color.vmax + "</span></div>";
   }
 }
-function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
 /* ---------------------------------------------------------------------
-   3. Karte (MapLibre GL). Raster-Kacheln als Style, eine Linien-Ebene je
-      Track. Die Einfärbung entlang der Linie erfolgt über 'line-gradient'
-      (benötigt lineMetrics: true an der Quelle) - dieselbe Idee wie
-      folium.ColorLine, aber vom Browser interpoliert.
+   4. Karte (Leaflet, Canvas-Renderer).
+      Die Track-Linie wird in Abschnitte zerlegt, die jeweils EINE Farbe
+      bekommen - so entsteht der Farbverlauf entlang der Strecke, ohne auf
+      GPU-Verläufe angewiesen zu sein. 240 Abschnitte je Track sind optisch
+      nicht mehr von einem echten Verlauf zu unterscheiden.
    --------------------------------------------------------------------- */
-const map = new maplibregl.Map({
-  container: "map",
-  style: {
-    version: 8,
-    sources: { base: { type: "raster", tiles: [D.basemap.tiles], tileSize: 256,
-                       maxzoom: D.basemap.maxzoom, attribution: D.basemap.attribution } },
-    layers: [{ id: "base", type: "raster", source: "base" }],
-  },
-  bounds: D.bounds, fitBoundsOptions: { padding: 30 }, attributionControl: true,
+const map = L.map("map", { preferCanvas: true, zoomControl: true });
+const renderer = L.canvas({ padding: 0.3 });
+L.tileLayer(D.basemap.tiles, {
+  maxZoom: D.basemap.maxzoom, maxNativeZoom: D.basemap.maxzoom,
+  attribution: D.basemap.attribution,
+}).addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+map.on("tileerror", () => showError(
+  "Kartenkacheln konnten nicht geladen werden (" + D.basemap.tiles + ")."));
+
+const allBounds = L.latLngBounds([D.bounds[0][1], D.bounds[0][0]],
+                                 [D.bounds[1][1], D.bounds[1][0]]);
+map.fitBounds(allBounds, { padding: [20, 20] });
+
+T.forEach(t => {
+  const n = t.lat.length;
+  const chunks = Math.max(1, Math.min(240, n - 1));
+  for (let s = 0; s < chunks; s++) {
+    const a = Math.round(s * (n - 1) / chunks);
+    const b = Math.round((s + 1) * (n - 1) / chunks);
+    const pts = [];
+    for (let i = a; i <= b; i++) pts.push([t.lat[i], t.lon[i]]);
+    if (pts.length < 2) continue;
+    const mid = Math.round((a + b) / 2);
+    L.polyline(pts, {
+      color: COL === "none" ? t.color : rampColor(attrOf(t, mid)),
+      weight: 4, opacity: 0.95, renderer: renderer, interactive: false,
+    }).addTo(map);
+  }
+  /* Start-/Endpunkt wie auf der Folium-Seite (grün/rot). */
+  L.circleMarker([t.lat[0], t.lon[0]], { radius: 7, weight: 2, color: "#fff",
+    fillColor: "#00a000", fillOpacity: 1, renderer: renderer })
+    .bindTooltip("Start: " + esc(t.title)).addTo(map);
+  L.circleMarker([t.lat[n - 1], t.lon[n - 1]], { radius: 7, weight: 2, color: "#fff",
+    fillColor: "#d00000", fillOpacity: 1, renderer: renderer })
+    .bindTooltip("Ende: " + esc(t.title)).addTo(map);
 });
-map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-left");
-map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
-map.dragRotate.disable();
-map.touchZoomRotate.disableRotation();
 
-/* Hover-Marker (folgt Profil bzw. Maus) */
-const pinEl = document.createElement("div");
-pinEl.className = "pin";
-const pin = new maplibregl.Marker({ element: pinEl })
-  .setLngLat([LON[0], LAT[0]]).addTo(map);
-pinEl.style.display = "none";
-
-map.on("load", () => {
-  T.forEach((t, ti) => {
-    const coords = [];
-    for (let i = 0; i < t.lon.length; i++) coords.push([t.lon[i], t.lat[i]]);
-    map.addSource("trk" + ti, {
-      type: "geojson", lineMetrics: true,
-      data: { type: "Feature", geometry: { type: "LineString", coordinates: coords } },
-    });
-
-    const paint = { "line-width": 4, "line-opacity": 0.95 };
-    if (COL === "none") {
-      paint["line-color"] = t.color;
-    } else {
-      /* line-gradient erwartet streng steigende Stützstellen in [0,1].
-         Auf höchstens 120 Stufen reduziert - mehr ist optisch nicht
-         unterscheidbar, macht den Ausdruck aber unnötig groß. */
-      const n = t.lon.length, steps = Math.min(120, n);
-      const stops = [];
-      for (let s = 0; s < steps; s++) {
-        const i = Math.round(s * (n - 1) / (steps - 1 || 1));
-        const p = Math.min(0.999999, Math.max(0, s / (steps - 1 || 1)));
-        if (s > 0 && p <= stops[stops.length - 2]) continue;
-        stops.push(p, rampColor(attrOf(t, i)));
-      }
-      /* line-color wird hier bewusst NICHT zusätzlich gesetzt: MapLibre
-         wertet bei gesetztem line-gradient ohnehin nur den Verlauf aus. */
-      paint["line-gradient"] = ["interpolate", ["linear"], ["line-progress"]].concat(stops);
-    }
-    map.addLayer({ id: "trk" + ti, type: "line", source: "trk" + ti,
-                   layout: { "line-cap": "round", "line-join": "round" }, paint });
-
-    /* Start-/Endpunkt wie auf der Folium-Seite (grün/rot). */
-    [["#00a000", 0], ["#d00000", t.lon.length - 1]].forEach(([c, i]) => {
-      const el = document.createElement("div");
-      el.className = "endpoint"; el.style.background = c;
-      new maplibregl.Marker({ element: el }).setLngLat([t.lon[i], t.lat[i]]).addTo(map);
-    });
-  });
-});
+/* Hover-Marker: folgt dem Profil bzw. der Maus. */
+const pin = L.circleMarker([LAT[0], LON[0]], {
+  radius: 8, weight: 3, color: "#fff", fillColor: "#ff2d55",
+  opacity: 0, fillOpacity: 0, renderer: renderer, interactive: false,
+}).addTo(map);
+function pinVisible(on) { pin.setStyle({ opacity: on ? 1 : 0, fillOpacity: on ? 1 : 0 }); }
 
 /* ---------------------------------------------------------------------
-   4. Gitter-Index für "nächstgelegener Trackpunkt zur Maus".
+   5. Gitter-Index für "nächstgelegener Trackpunkt zur Maus".
       Ein linearer Durchlauf über alle Punkte wäre bei jedem mousemove zu
       teuer; stattdessen werden die Punkte in Zellen von ~0,002° (~200 m)
       einsortiert und nur die Nachbarzellen durchsucht.
@@ -478,10 +585,10 @@ function nearest(lat, lon) {
   const cy = Math.floor(lat / CELL), cx = Math.floor(lon / CELL);
   const kx = Math.cos(lat * Math.PI / 180);
   let best = -1, bestD = Infinity;
-  for (let r = 1; r <= 4 && best < 0; r++) {        /* Radius erweitern, bis etwas gefunden wird */
+  for (let r = 1; r <= 4 && best < 0; r++) {
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
-        if (r > 1 && Math.max(Math.abs(dy), Math.abs(dx)) < r) continue;  /* innere Ringe schon geprüft */
+        if (r > 1 && Math.max(Math.abs(dy), Math.abs(dx)) < r) continue;
         const bucket = grid.get(key(cy + dy, cx + dx));
         if (!bucket) continue;
         for (const g of bucket) {
@@ -495,7 +602,7 @@ function nearest(lat, lon) {
 }
 
 /* ---------------------------------------------------------------------
-   5. Höhenprofil (uPlot). Eine gemeinsame x-Achse (km über alle Tracks),
+   6. Höhenprofil (uPlot). Eine gemeinsame x-Achse (km über alle Tracks),
       je Track eine Serie - außerhalb des eigenen Abschnitts mit null
       gefüllt, damit die Kurven nicht ineinander laufen.
    --------------------------------------------------------------------- */
@@ -506,16 +613,16 @@ const series = T.map((t, ti) => {
   return y;
 });
 
-/* Die Profilkurve wird mit demselben Farbverlauf gezeichnet wie die
-   Kartenlinie: ein horizontaler Canvas-Verlauf entlang der x-Achse - da x
-   die Distanz ist, entsprechen sich Kartenposition und Profilfarbe exakt. */
+/* Die Profilkurve bekommt denselben Farbverlauf wie die Kartenlinie: ein
+   horizontaler Canvas-Verlauf entlang der x-Achse. Da x die Distanz ist,
+   entsprechen sich Kartenposition und Profilfarbe exakt. */
 function gradientFor(ti, alpha) {
   return (u) => {
     const t = T[ti];
-    if (COL === "none") return alpha ? "rgba(0,0,0,0)" : t.color;
-    const ctx = u.ctx;
+    if (COL === "none") return alpha === null ? t.color : "rgba(0,0,0,0)";
     const x0 = u.bbox.left, x1 = u.bbox.left + u.bbox.width;
-    const grad = ctx.createLinearGradient(x0, 0, x1, 0);
+    if (!(x1 > x0)) return rampColor(attrOf(t, 0), alpha);
+    const grad = u.ctx.createLinearGradient(x0, 0, x1, 0);
     const n = t.km.length, steps = Math.min(64, n);
     let last = -1;
     for (let s = 0; s < steps; s++) {
@@ -526,11 +633,13 @@ function gradientFor(ti, alpha) {
       last = p;
       grad.addColorStop(p, rampColor(attrOf(t, i), alpha));
     }
+    if (last < 0) return rampColor(attrOf(t, 0), alpha);
     return grad;
   };
 }
 
-const fmt = (v, d, u) => (v === null || v === undefined) ? "–" : v.toFixed(d) + " " + u;
+const fmt = (v, d, unit) =>
+  (v === null || v === undefined) ? "–" : v.toFixed(d) + (unit ? " " + unit : "");
 function fmtDur(sec) {
   if (sec === null || sec === undefined) return "–";
   const s = Math.round(sec);
@@ -540,11 +649,13 @@ function fmtDur(sec) {
 }
 
 const readout = document.getElementById("readout");
+readout.innerHTML = '<span class="hint">' + T.length + " Track(s), " + N
+  + " Punkte – Maus über Karte oder Profil bewegen …</span>";
 function showPoint(g) {
   if (g < 0) return;
   const t = T[owner[g]], i = local[g];
-  pinEl.style.display = "block";
-  pin.setLngLat([t.lon[i], t.lat[i]]);
+  pinVisible(true);
+  pin.setLatLng([t.lat[i], t.lon[i]]);
   readout.innerHTML =
     '<span class="title">' + esc(t.title) + "</span>"
     + '<span><span class="k">km</span> <span class="v">' + fmt(t.km[i], 2, "") + "</span></span>"
@@ -554,22 +665,17 @@ function showPoint(g) {
     + '<span><span class="k">Zeit</span> <span class="v">' + fmtDur(t.sec[i]) + "</span></span>";
 }
 
+const profileEl = document.getElementById("profile");
+const plotWidth = () => Math.max(320, profileEl.clientWidth || 0);
 let syncing = false;   /* verhindert Rückkopplung Karte <-> Profil */
 
-const opts = {
-  width: document.getElementById("profile").clientWidth,
-  height: PROFH - 4,
-  cursor: {
-    y: false,
-    drag: { x: true, y: false },
-    points: { show: true, size: 9 },
-  },
+const u = new uPlot({
+  width: plotWidth(),
+  height: Math.max(120, PROFH - 4),
+  cursor: { y: false, drag: { x: true, y: false } },
   legend: { show: false },
   scales: { x: { time: false } },
-  axes: [
-    { label: "Distanz (km)", size: 40 },
-    { label: "Höhe (m)", size: 55 },
-  ],
+  axes: [{ label: "Distanz (km)", size: 40 }, { label: "Höhe (m)", size: 55 }],
   series: [
     { label: "km" },
     ...T.map((t, ti) => ({
@@ -583,58 +689,63 @@ const opts = {
   ],
   hooks: {
     /* Hover im Profil -> Marker auf der Karte */
-    setCursor: [u => {
-      const idx = u.cursor.idx;
+    setCursor: [uu => {
+      const idx = uu.cursor.idx;
       if (idx === null || idx === undefined) return;
       if (!syncing) showPoint(idx);
     }],
     /* Zoom im Profil (Ziehen) -> Karte auf denselben Abschnitt */
-    setScale: [(u, k) => {
+    setScale: [(uu, k) => {
       if (k !== "x") return;
-      const lo = u.scales.x.min, hi = u.scales.x.max;
-      let w = 181, s = 91, e = -181, n = -91, found = false;
-      for (let g = 0; g < N; g++) {
-        if (XS[g] < lo || XS[g] > hi) continue;
-        found = true;
-        w = Math.min(w, LON[g]); e = Math.max(e, LON[g]);
-        s = Math.min(s, LAT[g]); n = Math.max(n, LAT[g]);
-      }
-      if (found) map.fitBounds([[w, s], [e, n]], { padding: 40, duration: 500 });
+      const lo = uu.scales.x.min, hi = uu.scales.x.max;
+      const pts = [];
+      for (let g = 0; g < N; g++) if (XS[g] >= lo && XS[g] <= hi) pts.push([LAT[g], LON[g]]);
+      if (pts.length > 1) map.fitBounds(L.latLngBounds(pts), { padding: [30, 30] });
+      else map.fitBounds(allBounds, { padding: [20, 20] });
     }],
   },
-};
-
-const u = new uPlot(opts, [xs, ...series], document.getElementById("profile"));
+}, [xs, ...series], profileEl);
 
 /* Klick ins Profil -> Karte auf den Punkt zentrieren */
 u.over.addEventListener("click", () => {
   const idx = u.cursor.idx;
   if (idx === null || idx === undefined) return;
-  map.easeTo({ center: [LON[idx], LAT[idx]], zoom: Math.max(map.getZoom(), 14), duration: 400 });
+  map.setView([LAT[idx], LON[idx]], Math.max(map.getZoom(), 14));
 });
 
 /* Hover auf der Karte -> Cursor im Profil */
 map.on("mousemove", e => {
-  const g = nearest(e.lngLat.lat, e.lngLat.lng);
+  const g = nearest(e.latlng.lat, e.latlng.lng);
   if (g < 0) return;
   showPoint(g);
   syncing = true;
-  u.setCursor({ left: u.valToPos(XS[g], "x"), top: u.valToPos(T[owner[g]].ele[local[g]] ?? 0, "y") });
+  const ele = T[owner[g]].ele[local[g]];
+  u.setCursor({ left: u.valToPos(XS[g], "x"),
+                top: u.valToPos(ele === null ? u.scales.y.min : ele, "y") });
   syncing = false;
 });
-map.on("mouseout", () => { pinEl.style.display = "none"; });
+map.on("mouseout", () => pinVisible(false));
 
 /* "Alles zeigen": Profil-Zoom und Kartenausschnitt zurücksetzen */
 document.getElementById("reset").addEventListener("click", () => {
   u.setScale("x", { min: xs[0], max: xs[N - 1] });
-  map.fitBounds(D.bounds, { padding: 30, duration: 500 });
+  map.fitBounds(allBounds, { padding: [20, 20] });
 });
 
-/* Breitenänderung des Browserfensters: uPlot neu vermessen */
+/* Breitenänderung des Browserfensters: uPlot und Karte neu vermessen */
+let lastW = plotWidth();
 new ResizeObserver(() => {
-  u.setSize({ width: document.getElementById("profile").clientWidth, height: PROFH - 4 });
-  map.resize();
+  const w = plotWidth();
+  if (w !== lastW) {
+    lastW = w;
+    u.setSize({ width: w, height: Math.max(120, PROFH - 4) });
+  }
+  map.invalidateSize();
 }).observe(document.getElementById("wrap"));
+
+/* Leaflet vermisst sich beim Aufbau im iframe gelegentlich zu früh. */
+setTimeout(() => map.invalidateSize(), 200);
+}
 </script>
 """
 
@@ -648,15 +759,37 @@ def _component_html(payload: dict) -> str:
     "</script>", würde der Browser den Skriptblock sonst mittendrin
     beenden (klassische XSS-/Kaputt-Rendering-Falle bei JSON in <script>).
     """
+    payload = dict(payload)
+    payload["cdn"] = {
+        "leafletJs": _CDN_LEAFLET_JS,
+        "leafletCss": _CDN_LEAFLET_CSS,
+        "uplotJs": _CDN_UPLOT_JS,
+    }
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     return (
         _HTML_TEMPLATE
-        .replace("__CSS_MAPLIBRE__", _CDN_MAPLIBRE_CSS)
-        .replace("__CSS_UPLOT__", _CDN_UPLOT_CSS)
-        .replace("__JS_MAPLIBRE__", _CDN_MAPLIBRE_JS)
-        .replace("__JS_UPLOT__", _CDN_UPLOT_JS)
+        .replace("__UPLOT_CSS__", _UPLOT_CSS)
         .replace("__PAYLOAD__", data)
     )
+
+
+def _render_component(html: str, height: int) -> None:
+    """
+    Bettet das HTML als iframe ein.
+
+    Streamlit ≥ 1.56 hat st.components.v1.html durch st.iframe ersetzt
+    (die alte Funktion warnt bei jedem Rerun und fällt später weg).
+    st.iframe erkennt selbst, ob ein HTML-Text, eine URL oder ein Pfad
+    übergeben wurde - deshalb wird der Text ohne führende Leerzeichen
+    übergeben, damit die Erkennung eindeutig auf "<" trifft. Ältere
+    Streamlit-Versionen nutzen weiterhin den alten Aufruf.
+    """
+    html = html.lstrip()
+    render_iframe = getattr(st, "iframe", None)
+    if render_iframe is not None:
+        render_iframe(html, height=height)
+    else:
+        components.html(html, height=height, scrolling=False)
 
 
 def render_linked_map_page(settings_container=None) -> None:
@@ -747,12 +880,12 @@ def render_linked_map_page(settings_container=None) -> None:
                 map_height,
                 profile_height,
             )
-            components.html(
+            # +48 px für die Werte-Leiste über der Karte (und ggf. den
+            # Fehlerbalken); ohne Aufschlag schneidet der iframe das Profil
+            # unten ab.
+            _render_component(
                 _component_html(payload),
-                # +40 px für die Werte-Leiste über der Karte; ohne Aufschlag
-                # schneidet der iframe das Profil unten ab.
-                height=map_height + profile_height + 40,
-                scrolling=False,
+                height=map_height + profile_height + 48,
             )
             if payload["stride"] > 1:
                 st.caption(

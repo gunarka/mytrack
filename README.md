@@ -19,7 +19,7 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 | `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
 | `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion sowie der Planungsmodus. |
-| `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter und Kennzahlen wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (MapLibre GL JS + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
+| `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter und Kennzahlen wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
 `map.py`, `map_linked.py`, `stats.py` und `admin.py` stellen jeweils eine
@@ -207,6 +207,9 @@ Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
   automatisch auf genau diesen Abschnitt mit. "Alles zeigen" (oben rechts
   im Profil) setzt beides zurück.
 - **Klick ins Profil** zentriert die Karte auf den Punkt.
+- Tritt im Browser ein Fehler auf (Bibliothek nicht ladbar, Kachelserver
+  nicht erreichbar), erscheint dazu ein roter Hinweis oben in der
+  Komponente – statt einer wortlos leeren Karte.
 - Linie und Profilkurve sind nach derselben Farbskala eingefärbt wie auf
   der Seite "Karte" (Höhe, Geschwindigkeit, Gefälle); bei "Nichts"
   bekommt jeder Track eine eigene Farbe. Unten rechts liegt die Legende.
@@ -269,10 +272,12 @@ Glättung über 15 Punkte 596 m.
   exportiert). Dateien ohne Trackpunkte (reine Wegpunkt- oder
   Routen-Dateien) werden mit einer Meldung abgewiesen, statt die Seite
   mit einem Fehler abbrechen zu lassen.
-- Die Seite "Karte (Sync)" lädt MapLibre GL JS und uPlot von einem CDN
-  (unpkg.com) und benötigt dafür eine Internetverbindung. Für den
-  Offline-Betrieb lassen sich die vier Dateien lokal ablegen und die
-  Konstanten `_CDN_*` in `map_linked.py` anpassen.
+- Die Seite "Karte (Sync)" lädt Leaflet und uPlot von einem CDN und
+  benötigt dafür eine Internetverbindung. Je Bibliothek sind zwei CDNs
+  hinterlegt (unpkg, jsDelivr); ist keines erreichbar, erscheint eine
+  Meldung in der Komponente statt einer leeren Fläche. Für den
+  Offline-Betrieb lassen sich die Dateien lokal ablegen und die Konstanten
+  `_CDN_*` in `map_linked.py` anpassen.
 - Sehr große Auswahlen werden auf der Seite "Karte (Sync)" für die
   Darstellung ausgedünnt (höchstens 12.000 Punkte insgesamt, siehe
   `_MAX_TOTAL_POINTS`); ein Hinweis unter der Karte weist darauf hin. Die
