@@ -108,8 +108,7 @@ führendem Unterstrich.
   Seite "Karte" geteilt, damit die Auswahl beim Seitenwechsel steht)
 - Planung: `planning_mode`, `split_points`, `_last_planning_click`,
   `_last_planning_map_click`, `_last_track_ids`
-- Beenden: `_confirm_quit` (Sicherheitsabfrage sichtbar),
-  `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
+- Beenden: `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
 
 Die Track-Checkboxen werden bewusst persistent gehalten, damit die Auswahl
 Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in

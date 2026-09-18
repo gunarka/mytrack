@@ -18,9 +18,9 @@ Sie übernimmt drei Aufgaben:
        Anzeigeeinstellungen der Kartenseite (Farbauswahl, Spaltenbreite,
        Höhe von Karte/Profil) in einem gemeinsamen, einklappbaren Bereich
        der Seitenleiste (siehe 'settings_expander' weiter unten).
-    4. "Beenden"-Knopf am unteren Rand der Seitenleiste: trennt nach einer
-       Sicherheitsabfrage die Datenbankverbindung und beendet den
-       Streamlit-Prozess im Terminal (siehe functions.shutdown_app()).
+    4. "Beenden"-Knopf am unteren Rand der Seitenleiste: trennt die
+       Datenbankverbindung und beendet den Streamlit-Prozess im Terminal
+       (siehe functions.shutdown_app()).
 
 map.py, stats.py und admin.py enthalten dazu jeweils eine
 render_*_page()-Funktion
@@ -207,24 +207,14 @@ navigation.run()
 # Beenden-Knopf ganz unten in der Seitenleiste - bewusst NACH
 # navigation.run(), damit er unterhalb der von den Seitenmodulen
 # eingehängten Filter erscheint und nicht zwischen ihnen verschwindet.
-# Zweistufig (Knopf -> Sicherheitsabfrage), weil ein versehentlicher Klick
-# sonst laufende Uploads oder ungespeicherte Formulareingaben verwirft.
+# Der Klick beendet die App sofort (ohne Rückfrage): Ein Rerun setzt nur
+# das Flag, das beim nächsten Durchlauf oben die Abschiedsseite auslöst.
 with st.sidebar:
     st.divider()
-    if st.session_state.get("_confirm_quit"):
-        st.warning("Anwendung wirklich beenden?")
-        col_yes, col_no = st.columns(2)
-        if col_yes.button("Ja, beenden", type="primary", width="stretch"):
-            st.session_state["_confirm_quit"] = False
-            st.session_state["_shutdown_requested"] = True
-            st.rerun()
-        if col_no.button("Abbrechen", width="stretch"):
-            st.session_state["_confirm_quit"] = False
-            st.rerun()
-    elif st.button(
+    if st.button(
         "🚪 Beenden",
         width="stretch",
         help="Datenbankverbindung trennen und den Streamlit-Prozess beenden",
     ):
-        st.session_state["_confirm_quit"] = True
+        st.session_state["_shutdown_requested"] = True
         st.rerun()

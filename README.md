@@ -242,8 +242,8 @@ Auswertung über alle Tracks hinweg, ohne Filter:
 
 ### Anwendung beenden
 
-Ganz unten in der Seitenleiste liegt der Knopf **"🚪 Beenden"**. Nach einer
-Sicherheitsabfrage ("Ja, beenden" / "Abbrechen") passiert dreierlei:
+Ganz unten in der Seitenleiste liegt der Knopf **"🚪 Beenden"**. Ein Klick
+genügt – es passiert dreierlei:
 
 1. Die DuckDB-Verbindung wird geschlossen – die Datei
    `.data/tracks.duckdb` ist danach wieder frei (z. B. für `init.py`).
@@ -251,8 +251,8 @@ Sicherheitsabfrage ("Ja, beenden" / "Abbrechen") passiert dreierlei:
    geschlossen werden.
 3. Der Streamlit-Prozess im Terminal wird beendet – kein `Strg+C` nötig.
 
-Laufende Uploads oder nicht gespeicherte Formulareingaben gehen dabei
-verloren; deshalb die Sicherheitsabfrage.
+Es gibt keine Rückfrage: Laufende Uploads oder nicht gespeicherte
+Formulareingaben gehen beim Klick verloren.
 
 ## Auf- und Abstieg: Schwellwert oder Glättung
 
