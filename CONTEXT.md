@@ -10,7 +10,7 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 | | |
 |---|---|
 | Zweck | GPX-Tracks hochladen, verwalten, auf Karte/Höhenprofil ansehen, auswerten |
-| Stack | Python 3.10+, Streamlit ≥ 1.49, DuckDB, GeoPandas/gpxpy, Folium, Plotly |
+| Stack | Python 3.10+, Streamlit ≥ 1.49, DuckDB, GeoPandas/gpxpy, Folium, Plotly; auf der Seite "Karte (Sync)" zusätzlich MapLibre GL JS + uPlot (per CDN im Browser) |
 | Ausführung | Lokal, Single-User, `streamlit run app.py` |
 | Daten | Lokale Datei `.data/tracks.duckdb` (nicht im Repo, siehe `.gitignore`) |
 | Sprache | Oberfläche, Kommentare, Docstrings und Commits auf **Deutsch** |
@@ -20,6 +20,10 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 ```
 app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigation
 ├── map.py     Seite "Karte"      -> render_map_page(settings_container=None)
+│              zusätzlich: render_track_filters() - Sidebar-Filter, von
+│              beiden Kartenseiten genutzt
+├── map_linked.py  Seite "Karte (Sync)" -> render_linked_map_page(settings_container=None)
+│              Karte + Profil als EINE HTML/JS-Komponente (MapLibre + uPlot)
 ├── stats.py   Seite "Statistik"  -> render_stats_page()
 └── admin.py   Seite "Verwaltung" -> render_admin_page()
 functions.py   Gesamte Fachlogik: DB, GPX, Geocoding, Kennzahlen, CRUD
@@ -96,6 +100,10 @@ führendem Unterstrich.
 - Anzeige: `plot_column`, `kpi_col_width_pct`, `map_profile_height_mode`,
   `map_profile_total_height_px`, `window_height_js`
 - Karte/Profil: `selected_point`, `my_chart_key`
+- Karte (Sync): `lm_plot_column`, `lm_basemap` (Anzeigeeinstellungen
+  `kpi_col_width_pct`, `map_profile_height_mode`,
+  `map_profile_total_height_px` sowie alle Filter-Keys werden mit der
+  Seite "Karte" geteilt, damit die Auswahl beim Seitenwechsel steht)
 - Planung: `planning_mode`, `split_points`, `_last_planning_click`,
   `_last_planning_map_click`, `_last_track_ids`
 
@@ -127,7 +135,35 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Neue Auswertung | `stats.py` (`_render_*`), Daten über `load_metadata()` |
 | Neue Verwaltungsfunktion | Formular in `admin.py`, Schreiblogik in `functions.py` |
 | Neue Seite | Modul mit `render_*_page()` + Eintrag in `pages` in `app.py` |
+| Filter der Kartenseiten | `render_track_filters()` in `map.py` (wirkt auf beide Karten) |
+| Interaktion Karte/Profil ohne Rerun | JS-Vorlage `_HTML_TEMPLATE` in `map_linked.py` |
 | Änderung am GPX-Parsing | `process_gpx_dataframe()` (pro Punkt) |
+
+## Karte + Profil in einer Komponente (map_linked.py)
+
+Die Seite "Karte" besteht aus zwei getrennten Streamlit-Elementen
+(Folium-iframe, Plotly-Chart); beide können nur über einen Server-Rerun
+miteinander reden. `st_folium` meldet ausschließlich Klicks/Viewport,
+`st.plotly_chart` ausschließlich `on_select` – ein Rerun dauert
+100-500 ms, eine Hover-Kopplung bräuchte < 16 ms. Deshalb liegen auf der
+Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
+
+- Aufbau: `_build_payload()` (DataFrames -> JSON) ->
+  `_component_html()` (JSON in die HTML/JS-Vorlage) ->
+  `st.components.v1.html()`.
+- Kopplung im Browser: uPlot-Hook `setCursor` -> MapLibre-Marker;
+  MapLibre-`mousemove` -> `u.setCursor()`. Der nächstgelegene Trackpunkt
+  wird über einen Gitter-Index (~200-m-Zellen) gesucht, nicht linear.
+- Einfärbung: `line-gradient` (MapLibre, benötigt `lineMetrics: true`)
+  bzw. ein Canvas-Verlauf entlang der x-Achse (uPlot). Da x die Distanz
+  ist, stimmen Karten- und Profilfarbe punktgenau überein.
+- Die Komponente ist eine **Einbahnstraße**: kein Rückkanal nach
+  Streamlit. Alles, was Serverzustand braucht (Planungsmodus,
+  GPX-Export), bleibt auf der Seite "Karte". Ein Rückkanal bräuchte eine
+  echte bidirektionale Custom Component (Frontend-Build) oder
+  `streamlit-javascript`.
+- Keine neuen Python-Abhängigkeiten; die beiden JS-Bibliotheken kommen
+  versionsgepinnt vom CDN (`_CDN_*`).
 
 ## Fallstricke
 
@@ -146,6 +182,16 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
   Glättung) – Vergleichswerte nur mit identischen Parametern.
 - `config.toml` im Wurzelverzeichnis ist wirkungslos; wirksam ist
   `.streamlit/config.toml`.
+- JSON in `<script>`: `</` muss maskiert werden (siehe
+  `_component_html()`), sonst beendet ein Track-Titel mit `</script>` den
+  Skriptblock.
+- In `map_linked.py` kein f-String für die HTML-Vorlage verwenden – die
+  Vorlage ist voller geschweifter Klammern (JS/CSS). Platzhalter werden
+  per `.replace()` ersetzt.
+- `process_track()` liefert ein **gecachtes** DataFrame. `map.py` ändert
+  darin die Spalte `distance`; neue Module sollten die zurückgegebenen
+  Frames nicht verändern (`map_linked.py` rechnet die Gesamtdistanz
+  deshalb aus `dist_delta` neu).
 
 ## Arbeitsweise
 

@@ -19,16 +19,22 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 | `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
 | `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion sowie der Planungsmodus. |
+| `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter und Kennzahlen wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (MapLibre GL JS + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
-`map.py`, `stats.py` und `admin.py` stellen jeweils eine Funktion
-`render_map_page()`, `render_stats_page()` bzw. `render_admin_page()`
-bereit. `app.py` registriert diese über
+`map.py`, `map_linked.py`, `stats.py` und `admin.py` stellen jeweils eine
+Funktion `render_map_page()`, `render_linked_map_page()`,
+`render_stats_page()` bzw. `render_admin_page()` bereit. `app.py` registriert diese über
 [`st.navigation`](https://docs.streamlit.io/develop/api-reference/navigation/st.navigation)
 als Seiten und kümmert sich um die gemeinsame Seitenleiste. Diese Dateien
 lassen sich zum Debuggen weiterhin auch einzeln starten
 (`streamlit run admin.py` / `streamlit run map.py` /
-`streamlit run stats.py`).
+`streamlit run map_linked.py` / `streamlit run stats.py`).
+
+Die Sidebar-Filter (Sport/Land/Jahr/Jahreszeit und die Track-Auswahl)
+liegen als `map.render_track_filters()` an einer Stelle und werden von
+beiden Kartenseiten genutzt – beide verwenden dieselben Widget-Keys, die
+Auswahl bleibt beim Wechsel zwischen ihnen also erhalten.
 
 Die Datenbankverbindung (`functions.get_connection()`) ist über
 `st.cache_resource` als Singleton implementiert: Alle Module im selben
@@ -186,6 +192,31 @@ Kennzahlen-Spalte sowie die Höhe von Karte + Profil – wahlweise
 automatisch an die Browser-Fensterhöhe angepasst oder manuell per
 Schieberegler.
 
+**Karte (Sync)** (Seite "Karte (Sync)"):
+
+Dieselbe Track-Auswahl wie auf der Seite "Karte", aber Karte und
+Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
+
+- **Maus über dem Höhenprofil** → ein roter Marker wandert auf der Karte
+  an die passende Stelle.
+- **Maus über der Karte** → das Fadenkreuz im Profil springt auf den
+  nächstgelegenen Trackpunkt.
+- Eine Leiste über der Karte zeigt zum jeweiligen Punkt Track, Kilometer,
+  Höhe, Tempo, Steigung und die vergangene Zeit.
+- **Im Profil ziehen** zoomt auf einen Abschnitt; die Karte zoomt
+  automatisch auf genau diesen Abschnitt mit. "Alles zeigen" (oben rechts
+  im Profil) setzt beides zurück.
+- **Klick ins Profil** zentriert die Karte auf den Punkt.
+- Linie und Profilkurve sind nach derselben Farbskala eingefärbt wie auf
+  der Seite "Karte" (Höhe, Geschwindigkeit, Gefälle); bei "Nichts"
+  bekommt jeder Track eine eigene Farbe. Unten rechts liegt die Legende.
+- In den Einstellungen lässt sich zusätzlich die Hintergrundkarte wählen
+  (OpenTopoMap, OpenStreetMap, Carto Positron).
+
+Der **Planungsmodus** (Unterteilungspunkte, Export) bleibt bewusst auf der
+Seite "Karte": Er braucht Serverzustand, während diese Seite vollständig
+im Browser läuft und nichts an Streamlit zurückmeldet.
+
 **Statistik** (Seite "Statistik"):
 
 Auswertung über alle Tracks hinweg, ohne Filter:
@@ -238,6 +269,17 @@ Glättung über 15 Punkte 596 m.
   exportiert). Dateien ohne Trackpunkte (reine Wegpunkt- oder
   Routen-Dateien) werden mit einer Meldung abgewiesen, statt die Seite
   mit einem Fehler abbrechen zu lassen.
+- Die Seite "Karte (Sync)" lädt MapLibre GL JS und uPlot von einem CDN
+  (unpkg.com) und benötigt dafür eine Internetverbindung. Für den
+  Offline-Betrieb lassen sich die vier Dateien lokal ablegen und die
+  Konstanten `_CDN_*` in `map_linked.py` anpassen.
+- Sehr große Auswahlen werden auf der Seite "Karte (Sync)" für die
+  Darstellung ausgedünnt (höchstens 12.000 Punkte insgesamt, siehe
+  `_MAX_TOTAL_POINTS`); ein Hinweis unter der Karte weist darauf hin. Die
+  Kennzahlen werden davon nicht berührt.
+- Jeder Streamlit-Rerun (z.B. ein geänderter Filter) baut die Komponente
+  der Seite "Karte (Sync)" neu auf – Kartenausschnitt und Profil-Zoom
+  beginnen dann wieder bei der Gesamtansicht.
 - Kennzahlen aus Zeit und Tempo setzen Zeitstempel in der GPX-Datei
   voraus. Fehlen sie, bleiben Dauer, Tempo und "Zeit in Bewegung" leer;
   Distanz und Höhenwerte werden trotzdem berechnet.

@@ -1377,91 +1377,31 @@ def _render_map_and_profile(
                 st.rerun()
 
 
-def render_map_page(settings_container=None) -> None:
+def render_track_filters() -> pd.DataFrame:
     """
-    Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil).
+    Rendert die komplette Track-Auswahl in der Seitenleiste und liefert die
+    Metadaten der ausgewählten Tracks zurück.
 
-    'settings_container' ist ein Streamlit-Container (typischerweise ein
-    st.expander), in den die Anzeigeeinstellungen - Farbauswahl für
-    Karte/Profil, Spaltenbreite der Kennzahlen-Box sowie Höhe von
-    Karte/Profil - gerendert werden. Im Normalbetrieb übergibt app.py
-    hierfür denselben aufklappbaren Seitenleisten-Bereich, der dort auch
-    die Seiten-Navigation (Karte/Verwaltung) enthält - dadurch landen
-    Navigation UND Anzeigeeinstellungen gemeinsam in einem einzigen
-    einklappbaren Container. Beim direkten Debug-Start
-    (`streamlit run map.py`, siehe Dateiende) gibt es dieses app.py nicht,
-    daher wird in diesem Fall ein eigener Expander angelegt.
+    Der Ablauf ist:
+
+        1. Metadaten aller Tracks laden (load_metadata) und Jahr, Monat,
+           Jahreszeit sowie die Länderliste je Track ableiten.
+        2. Vier kaskadierende Pills-Filter: Sport -> Land -> Jahr ->
+           Jahreszeit. Jede Stufe zeigt nur noch Optionen, die zur bisherigen
+           Auswahl passen.
+        3. Aufklappbare Baum-Auswahl Jahr -> Monat -> Tour -> Track
+           (_render_track_tree).
+
+    Sind keine Tracks vorhanden oder ist keiner ausgewählt, wird eine
+    Meldung ausgegeben und der Seitenaufbau per st.stop() abgebrochen.
+
+    Bewusst als eigene, öffentliche Funktion herausgelöst: Sowohl die Seite
+    "Karte" (render_map_page, hier) als auch die Seite "Karte (Sync)"
+    (map_linked.render_linked_map_page) verwenden exakt dieselben Filter.
+    Da beide Seiten auch dieselben Widget-Keys (sport_select, year_select,
+    track_<id>, ...) benutzen, bleibt die getroffene Auswahl beim Wechsel
+    zwischen den beiden Kartenseiten erhalten.
     """
-    if settings_container is None:
-        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
-
-    # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
-    # Punkt-Indizes) zentral initialisieren: _render_planning_kpis() wird
-    # weiter unten VOR _render_map_and_profile() aufgerufen und greift
-    # bereits darauf zu.
-    st.session_state.setdefault("split_points", {})
-
-    # ----------------------------------------------------------------------
-    # Aufklappbarer Seitenleisten-Bereich: Anzeigeeinstellungen
-    # ----------------------------------------------------------------------
-    # Enthält (zusammen mit der Navigation aus app.py): Farbauswahl für
-    # Karte/Höhenprofil, Spaltenbreite der Kennzahlen-Box sowie die Höhe von
-    # Karte + Höhenprofil (automatisch an die Fensterhöhe angepasst oder
-    # manuell per Schieberegler) - bewusst von den darunter folgenden
-    # Filtern (Sport/Land/Jahr/Jahreszeit, Track-Auswahl) getrennt, damit
-    # diese immer sofort sichtbar bleiben.
-    with settings_container:
-        color_options = {
-            "ele": "Höhe",
-            "km_per_h": "Geschwindigkeit",
-            "slope": "Gefälle",
-            "none": "Nichts",
-        }
-        st.selectbox(
-            "Einfärben mit",
-            options=list(color_options.keys()),
-            key="plot_column",
-            format_func=lambda x: color_options[x],
-        )
-
-        st.slider(
-            "Spaltenbreite Kennzahlen",
-            min_value=10,
-            max_value=35,
-            value=15,
-            key="kpi_col_width_pct",
-            help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
-        )
-
-        st.radio(
-            "Höhe Karte + Profil",
-            options=["window", "manual"],
-            index=0,
-            key="map_profile_height_mode",
-            format_func=lambda x: "An Fensterhöhe anpassen" if x == "window" else "Manuell",
-            help=(
-                "'An Fensterhöhe anpassen' liest beim ersten Laden die "
-                "tatsächliche Browser-Fensterhöhe per JavaScript aus "
-                "(window.parent.innerHeight) und passt Karte + Profil "
-                "entsprechend an. Nach einer Fenster-Grössenänderung wird "
-                "der Wert beim nächsten Rerun aktualisiert. "
-                "Für eine sofortige, feste Höhe: 'Manuell' wählen."
-            ),
-        )
-        if st.session_state.map_profile_height_mode == "manual":
-            st.slider(
-                "Höhe Karte + Profil (px)",
-                min_value=_MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX,
-                max_value=_MAX_TOTAL_HEIGHT_PX,
-                step=100,
-                value=_DEFAULT_TOTAL_HEIGHT_PX,
-                key="map_profile_total_height_px",
-                help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
-            )
-
-    # ----------------------------------------------------------------------
-    # Sidebar: Filter
-    # ----------------------------------------------------------------------
     with st.sidebar:
         meta = load_metadata()
 
@@ -1545,6 +1485,100 @@ def render_map_page(settings_container=None) -> None:
             st.error("wähle einen Track")
             st.stop()
         meta = meta[meta["track_id"].isin(selected_tracks)]
+        return meta
+
+
+def render_map_page(settings_container=None) -> None:
+    """
+    Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil).
+
+    'settings_container' ist ein Streamlit-Container (typischerweise ein
+    st.expander), in den die Anzeigeeinstellungen - Farbauswahl für
+    Karte/Profil, Spaltenbreite der Kennzahlen-Box sowie Höhe von
+    Karte/Profil - gerendert werden. Im Normalbetrieb übergibt app.py
+    hierfür denselben aufklappbaren Seitenleisten-Bereich, der dort auch
+    die Seiten-Navigation (Karte/Verwaltung) enthält - dadurch landen
+    Navigation UND Anzeigeeinstellungen gemeinsam in einem einzigen
+    einklappbaren Container. Beim direkten Debug-Start
+    (`streamlit run map.py`, siehe Dateiende) gibt es dieses app.py nicht,
+    daher wird in diesem Fall ein eigener Expander angelegt.
+    """
+    if settings_container is None:
+        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
+
+    # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
+    # Punkt-Indizes) zentral initialisieren: _render_planning_kpis() wird
+    # weiter unten VOR _render_map_and_profile() aufgerufen und greift
+    # bereits darauf zu.
+    st.session_state.setdefault("split_points", {})
+
+    # ----------------------------------------------------------------------
+    # Aufklappbarer Seitenleisten-Bereich: Anzeigeeinstellungen
+    # ----------------------------------------------------------------------
+    # Enthält (zusammen mit der Navigation aus app.py): Farbauswahl für
+    # Karte/Höhenprofil, Spaltenbreite der Kennzahlen-Box sowie die Höhe von
+    # Karte + Höhenprofil (automatisch an die Fensterhöhe angepasst oder
+    # manuell per Schieberegler) - bewusst von den darunter folgenden
+    # Filtern (Sport/Land/Jahr/Jahreszeit, Track-Auswahl) getrennt, damit
+    # diese immer sofort sichtbar bleiben.
+    with settings_container:
+        color_options = {
+            "ele": "Höhe",
+            "km_per_h": "Geschwindigkeit",
+            "slope": "Gefälle",
+            "none": "Nichts",
+        }
+        st.selectbox(
+            "Einfärben mit",
+            options=list(color_options.keys()),
+            key="plot_column",
+            format_func=lambda x: color_options[x],
+        )
+
+        st.slider(
+            "Spaltenbreite Kennzahlen",
+            min_value=10,
+            max_value=35,
+            value=15,
+            key="kpi_col_width_pct",
+            help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
+        )
+
+        st.radio(
+            "Höhe Karte + Profil",
+            options=["window", "manual"],
+            index=0,
+            key="map_profile_height_mode",
+            format_func=lambda x: "An Fensterhöhe anpassen" if x == "window" else "Manuell",
+            help=(
+                "'An Fensterhöhe anpassen' liest beim ersten Laden die "
+                "tatsächliche Browser-Fensterhöhe per JavaScript aus "
+                "(window.parent.innerHeight) und passt Karte + Profil "
+                "entsprechend an. Nach einer Fenster-Grössenänderung wird "
+                "der Wert beim nächsten Rerun aktualisiert. "
+                "Für eine sofortige, feste Höhe: 'Manuell' wählen."
+            ),
+        )
+        if st.session_state.map_profile_height_mode == "manual":
+            st.slider(
+                "Höhe Karte + Profil (px)",
+                min_value=_MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX,
+                max_value=_MAX_TOTAL_HEIGHT_PX,
+                step=100,
+                value=_DEFAULT_TOTAL_HEIGHT_PX,
+                key="map_profile_total_height_px",
+                help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
+            )
+
+    # ----------------------------------------------------------------------
+    # Sidebar: Filter (Sport/Land/Jahr/Jahreszeit + Track-Baum)
+    # ----------------------------------------------------------------------
+    # Gemeinsam mit der Seite "Karte (Sync)" genutzt, siehe
+    # render_track_filters() weiter oben.
+    meta = render_track_filters()
+    selected_tracks = meta["track_id"].tolist()
+
+    with st.sidebar:
 
         # ------------------------------------------------------------------
         # Planungsmodus (Tourenplanung): nur aktivierbar bei GENAU einem

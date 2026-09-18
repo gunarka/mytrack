@@ -13,8 +13,8 @@ Sie übernimmt drei Aufgaben:
        werden, daher steht sie hier statt in map.py/admin.py.
     2. Titel und Beschreibung in der Seitenleiste, sichtbar auf jeder Seite.
     3. Seitenleisten-Navigation, über die zwischen "Karte" (map.py),
-       "Statistik" (stats.py) und "Verwaltung" (admin.py) gewechselt
-       werden kann - zusammen mit den
+       "Karte (Sync)" (map_linked.py), "Statistik" (stats.py) und
+       "Verwaltung" (admin.py) gewechselt werden kann - zusammen mit den
        Anzeigeeinstellungen der Kartenseite (Farbauswahl, Spaltenbreite,
        Höhe von Karte/Profil) in einem gemeinsamen, einklappbaren Bereich
        der Seitenleiste (siehe 'settings_expander' weiter unten).
@@ -33,6 +33,7 @@ import streamlit as st
 
 from admin import render_admin_page
 from map import render_map_page
+from map_linked import render_linked_map_page
 from stats import render_stats_page
 
 # Muss als allererster Streamlit-Befehl der gesamten App stehen.
@@ -144,6 +145,12 @@ pages = [
         icon="🗺️",
         url_path="karte",
         default=True,
+    ),
+    st.Page(
+        functools.partial(render_linked_map_page, settings_container=settings_expander),
+        title="Karte (Sync)",
+        icon="🧭",
+        url_path="karte-sync",
     ),
     st.Page(
         render_stats_page,
