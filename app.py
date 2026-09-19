@@ -20,7 +20,14 @@ Sie übernimmt drei Aufgaben:
        der Seitenleiste (siehe 'settings_expander' weiter unten).
     4. "Beenden"-Knopf am unteren Rand der Seitenleiste: trennt die
        Datenbankverbindung und beendet den Streamlit-Prozess im Terminal
-       (siehe functions.shutdown_app()).
+       (siehe functions.shutdown_app()). Er wird auf JEDER Seite und in
+       jedem Zustand angezeigt - auch dann, wenn eine Seite mangels
+       Auswahl keinen Inhalt aufbauen kann.
+
+WICHTIG für neue Seiten: Eine render_*_page()-Funktion darf ihren Aufbau
+nur per `return` abbrechen, niemals per `st.stop()`. `st.stop()` beendet
+den gesamten Skriptdurchlauf, sodass der erst danach gerenderte
+"Beenden"-Knopf verschwinden würde (siehe map.render_track_filters()).
 
 map.py, stats.py und admin.py enthalten dazu jeweils eine
 render_*_page()-Funktion
@@ -207,6 +214,10 @@ navigation.run()
 # Beenden-Knopf ganz unten in der Seitenleiste - bewusst NACH
 # navigation.run(), damit er unterhalb der von den Seitenmodulen
 # eingehängten Filter erscheint und nicht zwischen ihnen verschwindet.
+# Damit er dabei IMMER sichtbar bleibt, dürfen die Seitenmodule den
+# Skriptdurchlauf nicht per st.stop() abbrechen (siehe Modul-Docstring):
+# Fehlt z.B. auf der Kartenseite eine Track-Auswahl, verlässt nur
+# render_map_page() sich selbst per return - dieser Block läuft weiter.
 # Der Klick beendet die App sofort (ohne Rückfrage): Ein Rerun setzt nur
 # das Flag, das beim nächsten Durchlauf oben die Abschiedsseite auslöst.
 with st.sidebar:

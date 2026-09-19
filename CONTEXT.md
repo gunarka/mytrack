@@ -19,7 +19,9 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 
 ```
 app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigation,
-               "Beenden"-Knopf (Abschiedsseite + functions.shutdown_app())
+               "Beenden"-Knopf (Abschiedsseite + functions.shutdown_app());
+               der Knopf wird NACH navigation.run() gerendert und ist auf
+               jeder Seite und in jedem Zustand sichtbar
 ├── map.py     Seite "Karte"      -> render_map_page(settings_container=None)
 │              zusätzlich: render_track_filters() - Sidebar-Filter und
 │              render_planning_toggle() - Schalter "📐 Planung", beide von
@@ -162,6 +164,7 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Neue Verwaltungsfunktion | Formular in `admin.py`, Schreiblogik in `functions.py` |
 | Neue Seite | Modul mit `render_*_page()` + Eintrag in `pages` in `app.py` |
 | Verhalten beim Beenden | `shutdown_app()`/`close_connection()` in `functions.py`, UI-Teil am Ende von `app.py` |
+| Verhalten ohne Track-Auswahl | `render_track_filters()` (leeres DataFrame) + `render_no_selection_hint()` in `map.py` |
 | Filter der Kartenseiten | `render_track_filters()` in `map.py` (wirkt auf beide Karten) |
 | Darstellung der Track-Auswahl | `_render_track_tree()` / `_render_tour_group()` in `map.py` |
 | Info-Punkte (Logik/Export) | `functions.py`, Abschnitt "Info-Punkte" |
@@ -291,6 +294,14 @@ noch nicht kennt – dann ist lediglich der Füllmodus wirkungslos.
   darin die Spalte `distance`; neue Module sollten die zurückgegebenen
   Frames nicht verändern (`map_linked.py` rechnet die Gesamtdistanz
   deshalb aus `dist_delta` neu).
+- `render_*_page()` darf den Seitenaufbau **nur per `return`** abbrechen,
+  nie per `st.stop()`: `st.stop()` beendet den kompletten Skriptdurchlauf,
+  damit auch den erst danach gerenderten "🚪 Beenden"-Knopf aus `app.py`
+  (und ein späteres Abfangen ist nicht möglich – nach einer Stop-Anforderung
+  bricht jedes weitere `st.`-Kommando erneut ab). `render_track_filters()`
+  liefert deshalb bei fehlender Auswahl ein **leeres DataFrame**; beide
+  Kartenseiten prüfen `meta.empty`, zeigen `render_no_selection_hint()` und
+  kehren zurück.
 - Beenden: Die Abschiedsseite muss **vor** `navigation.run()` geprüft und
   mit `st.stop()` abgeschlossen werden – sonst läuft beim Herunterfahren
   noch eine Seite gegen die gerade geschlossene Verbindung. Der Prozess

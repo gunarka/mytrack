@@ -168,7 +168,9 @@ Ein Klick auf ihre Checkbox wählt alle Etappen auf einmal aus; der
 `▸`-Knopf davor klappt die einzelnen Tracks auf, die sich dann auch
 einzeln (ab-)wählen lassen. Eine Tour erscheint je Jahr genau **einmal**,
 einsortiert unter dem Monat ihrer ersten Etappe – auch wenn sie über
-einen Monatswechsel läuft. Es muss mindestens ein Track ausgewählt sein.
+einen Monatswechsel läuft. Es muss mindestens ein Track ausgewählt sein –
+solange keiner gewählt ist, weisen Seitenleiste und Hauptbereich darauf hin;
+die Seitenleiste (inklusive **"🚪 Beenden"**) bleibt dabei voll bedienbar.
 Zusätzlich kann oben eine Farb-Spalte für das Höhenprofil gewählt werden
 (Höhe, Geschwindigkeit, Gefälle oder einfarbig).
 
@@ -303,8 +305,10 @@ Auswertung über alle Tracks hinweg, ohne Filter:
 
 ### Anwendung beenden
 
-Ganz unten in der Seitenleiste liegt der Knopf **"🚪 Beenden"**. Ein Klick
-genügt – es passiert dreierlei:
+Ganz unten in der Seitenleiste liegt der Knopf **"🚪 Beenden"**. Er wird auf
+jeder Seite und in jedem Zustand angezeigt – auch dann, wenn noch kein Track
+ausgewählt ist oder die Datenbank noch leer ist. Ein Klick genügt – es
+passiert dreierlei:
 
 1. Die DuckDB-Verbindung wird geschlossen – die Datei
    `.data/tracks.duckdb` ist danach wieder frei (z. B. für `init.py`).

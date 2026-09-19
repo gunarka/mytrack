@@ -1952,7 +1952,13 @@ def render_track_filters() -> pd.DataFrame:
            (_render_track_tree).
 
     Sind keine Tracks vorhanden oder ist keiner ausgewählt, wird eine
-    Meldung ausgegeben und der Seitenaufbau per st.stop() abgebrochen.
+    Meldung in der Seitenleiste ausgegeben und ein LEERES DataFrame
+    zurückgegeben. Bewusst kein st.stop(): Das würde den kompletten
+    Skriptdurchlauf abbrechen, sodass auch die erst nach der Seite
+    gerenderten Elemente von app.py - insbesondere der "🚪 Beenden"-Knopf -
+    nicht mehr erscheinen. Die aufrufende Seite prüft stattdessen
+    `meta.empty` und bricht nur ihren eigenen Aufbau ab (siehe
+    render_no_selection_hint()).
 
     Bewusst als eigene, öffentliche Funktion herausgelöst: Sowohl die Seite
     "Karte" (render_map_page, hier) als auch die Seite "Karte (Sync)"
@@ -1966,7 +1972,7 @@ def render_track_filters() -> pd.DataFrame:
 
         if meta["track_id"].dropna().empty:
             st.info("Noch keine Tracks vorhanden. Lege zuerst welche in der Verwaltung an.")
-            st.stop()
+            return meta.iloc[0:0]
 
         # Jahr/Monat/Jahreszeit aus dem Startzeitpunkt ableiten - Basis
         # sowohl für die Pills-Filter als auch für die Baum-Gruppierung
@@ -2041,10 +2047,26 @@ def render_track_filters() -> pd.DataFrame:
             selected_tracks = _render_track_tree(meta)
 
         if not selected_tracks:
-            st.error("wähle einen Track")
-            st.stop()
+            st.warning("Bitte mindestens einen Track auswählen.")
+            return meta.iloc[0:0]
         meta = meta[meta["track_id"].isin(selected_tracks)]
         return meta
+
+
+def render_no_selection_hint() -> None:
+    """
+    Hinweis im Hauptbereich, wenn render_track_filters() nichts geliefert
+    hat (keine Tracks vorhanden oder keiner ausgewählt).
+
+    Wird von beiden Kartenseiten unmittelbar vor dem vorzeitigen Verlassen
+    der jeweiligen render_*_page()-Funktion aufgerufen, damit der
+    Hauptbereich nicht einfach leer bleibt. Der restliche Skriptdurchlauf
+    (und damit der "🚪 Beenden"-Knopf in app.py) läuft normal weiter.
+    """
+    st.info(
+        "Keine Auswahl: In der Seitenleiste links mindestens einen Track "
+        "auswählen, um Karte, Höhenprofil und Kennzahlen zu sehen."
+    )
 
 
 def render_planning_toggle(selected_tracks: list) -> bool:
@@ -2155,6 +2177,12 @@ def render_map_page(settings_container=None) -> None:
     # Gemeinsam mit der Seite "Karte (Sync)" genutzt, siehe
     # render_track_filters() weiter oben.
     meta = render_track_filters()
+    if meta.empty:
+        # Keine Tracks vorhanden bzw. keiner ausgewählt: nur den Aufbau
+        # DIESER Seite beenden (kein st.stop()), damit app.py danach noch
+        # den "🚪 Beenden"-Knopf in die Seitenleiste rendern kann.
+        render_no_selection_hint()
+        return
     selected_tracks = meta["track_id"].tolist()
 
     # Planungsmodus-Schalter in der Seitenleiste (gemeinsam mit der Seite

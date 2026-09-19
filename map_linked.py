@@ -100,6 +100,7 @@ from map import (
     _render_planning_kpis,
     _resolve_map_profile_height,
     _height_mode,
+    render_no_selection_hint,
     render_planning_toggle,
     render_track_filters,
 )
@@ -1015,6 +1016,12 @@ def render_linked_map_page(settings_container=None) -> None:
     # Dieselben Filter wie auf der Seite "Karte" (gemeinsame Widget-Keys,
     # die Auswahl bleibt beim Seitenwechsel also erhalten).
     meta = render_track_filters()
+    if meta.empty:
+        # Wie auf der Seite "Karte": nur diesen Seitenaufbau beenden (kein
+        # st.stop()), damit der "🚪 Beenden"-Knopf aus app.py weiterhin
+        # gerendert wird.
+        render_no_selection_hint()
+        return
 
     # Ebenso der Planungsmodus-Schalter: gemeinsamer Widget-Key
     # 'planning_mode', der Modus bleibt beim Seitenwechsel also erhalten.
