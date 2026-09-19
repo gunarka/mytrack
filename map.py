@@ -1488,6 +1488,45 @@ def render_track_filters() -> pd.DataFrame:
         return meta
 
 
+def render_planning_toggle(selected_tracks: list) -> bool:
+    """
+    Zeichnet den Schalter "📐 Planung" in die Seitenleiste und meldet
+    zurück, ob der Planungsmodus aktiv ist.
+
+    Der Modus ist nur bei GENAU einem ausgewählten Track aktivierbar, da
+    sich nur ein einzelner Track sinnvoll in Teile unterteilen lässt (siehe
+    Modul-Docstring, Punkt 4). Fällt die Bedingung weg (z.B. weitere Tracks
+    dazu ausgewählt, während der Modus bereits aktiv war), wird er
+    automatisch wieder deaktiviert, statt nur das Steuerelement zu sperren.
+
+    Bewusst - wie render_track_filters() - als eigene, öffentliche Funktion
+    herausgelöst: Beide Kartenseiten zeigen denselben Schalter mit
+    demselben Widget-Key ('planning_mode'), sodass der Modus beim Wechsel
+    zwischen "Karte" und "Karte (Sync)" erhalten bleibt. Gesetzt werden die
+    Unterteilungspunkte allerdings nur auf der Seite "Karte" (die
+    Sync-Komponente meldet nichts an Streamlit zurück); "Karte (Sync)"
+    zeigt sie lediglich in Karte und Höhenprofil an.
+    """
+    with st.sidebar:
+        st.divider()
+        single_track_selected = len(selected_tracks) == 1
+        if not single_track_selected:
+            st.session_state.planning_mode = False
+        st.toggle(
+            "📐 Planung",
+            key="planning_mode",
+            disabled=not single_track_selected,
+            help=(
+                "Im Planungsmodus lässt sich der ausgewählte Track per "
+                "Klick auf die Karte oder ins Höhenprofil in Teile "
+                "unterteilen. Dafür muss genau ein Track ausgewählt sein. "
+                "Auf der Seite \"Karte (Sync)\" werden die gesetzten Punkte "
+                "nur angezeigt."
+            ),
+        )
+    return bool(st.session_state.get("planning_mode")) and single_track_selected
+
+
 def render_map_page(settings_container=None) -> None:
     """
     Baut die komplette Kartenseite auf (Sidebar-Filter, Karte, Höhenprofil).
@@ -1578,30 +1617,9 @@ def render_map_page(settings_container=None) -> None:
     meta = render_track_filters()
     selected_tracks = meta["track_id"].tolist()
 
-    with st.sidebar:
-
-        # ------------------------------------------------------------------
-        # Planungsmodus (Tourenplanung): nur aktivierbar bei GENAU einem
-        # ausgewählten Track, da sich nur ein einzelner Track sinnvoll in
-        # Teile unterteilen lässt (siehe Modul-Docstring, Punkt 4).
-        # Fällt die Bedingung weg (z.B. weitere Tracks dazu ausgewählt,
-        # während der Modus bereits aktiv war), wird er automatisch wieder
-        # deaktiviert, statt nur das Steuerelement zu sperren.
-        # ------------------------------------------------------------------
-        st.divider()
-        single_track_selected = len(selected_tracks) == 1
-        if not single_track_selected:
-            st.session_state.planning_mode = False
-        st.toggle(
-            "📐 Planung",
-            key="planning_mode",
-            disabled=not single_track_selected,
-            help=(
-                "Im Planungsmodus lässt sich der ausgewählte Track per "
-                "Klick auf die Karte oder ins Höhenprofil in Teile "
-                "unterteilen. Dafür muss genau ein Track ausgewählt sein."
-            ),
-        )
+    # Planungsmodus-Schalter in der Seitenleiste (gemeinsam mit der Seite
+    # "Karte (Sync)", siehe render_planning_toggle() weiter oben).
+    render_planning_toggle(selected_tracks)
 
     # Erst JETZT, nachdem feststeht welche Tracks tatsächlich gebraucht
     # werden, die zugehörigen (potenziell großen) GPX-Binärdaten nachladen.

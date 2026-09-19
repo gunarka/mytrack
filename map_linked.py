@@ -46,12 +46,18 @@ Funktionsumfang
    Abschnitt; Doppelklick bzw. die Schaltfläche "Alles zeigen" setzt
    beides zurück.
 6. Klick ins Profil zentriert die Karte auf den Punkt.
+7. Start (S, grün), Ende (Z, rot) und - im Planungsmodus - die gesetzten
+   Unterteilungspunkte (orange, nummeriert) erscheinen sowohl auf der Karte
+   als auch im Höhenprofil, jeweils an derselben Kilometerstelle.
 
 Bewusste Einschränkungen
 ------------------------
 - Die Komponente ist eine Einbahnstraße: Sie meldet nichts an Streamlit
-  zurück. Der Planungsmodus (Unterteilungspunkte setzen) bleibt deshalb auf
-  der Seite "Karte" (map.py), da er Serverzustand braucht. Für einen
+  zurück. Unterteilungspunkte lassen sich hier deshalb nur ANZEIGEN;
+  gesetzt und gelöscht werden sie auf der Seite "Karte" (map.py) bzw. über
+  die Punkteliste in der Kennzahlen-Spalte, da das Serverzustand braucht.
+  Der Schalter "📐 Planung" und die Kennzahlen je Teil sind dagegen auf
+  beiden Seiten vorhanden (siehe map.render_planning_toggle). Für einen
   Rückkanal wäre eine echte bidirektionale Custom Component nötig
   (Frontend-Build) oder `streamlit-javascript`.
 - Die JS-Bibliotheken werden von einem CDN geladen (siehe _CDN_*), es wird
@@ -87,7 +93,9 @@ import streamlit.components.v1 as components
 from functions import load_track_files, process_track
 from map import (
     _render_kpis,
+    _render_planning_kpis,
     _resolve_map_profile_height,
+    render_planning_toggle,
     render_track_filters,
 )
 
@@ -188,6 +196,7 @@ def _build_payload(
     basemap_key: str,
     map_height: int,
     profile_height: int,
+    split_points: dict | None = None,
 ) -> dict:
     """
     Baut die komplette Datenstruktur für die Browser-Komponente auf.
@@ -202,6 +211,14 @@ def _build_payload(
     gespeicherten Kennzahlen, nicht aus den ausgedünnten Punkten - so bleibt
     die Einfärbung unabhängig von der Ausdünnung), die Bounding-Box aller
     Tracks sowie die Anzeige-Einstellungen.
+
+    'split_points' sind die im Planungsmodus gesetzten Unterteilungspunkte
+    (track_id -> Liste von Punkt-Indizes, siehe map.st.session_state
+    'split_points'). Sie werden auf die ausgedünnte Punktfolge umgerechnet
+    (der nächstgelegene übertragene Punkt gewinnt) und je Track als
+    'splits' mitgeschickt; die Komponente zeichnet sie als orange Marker
+    auf Karte UND Höhenprofil. Gesetzt werden können sie hier nicht - dafür
+    bräuchte es einen Rückkanal nach Streamlit (siehe Modul-Docstring).
     """
     # Zuerst alle Tracks verarbeiten (gecacht, siehe functions.process_track),
     # um die Gesamtpunktzahl und damit den nötigen Ausdünnungsfaktor zu kennen.
@@ -233,6 +250,22 @@ def _build_payload(
             continue
         sub = gdf.iloc[idx]
 
+        # Unterteilungspunkte (Planungsmodus) auf die ausgedünnte Punktfolge
+        # abbilden: Der Punkt-Index bezieht sich auf das VOLLE Track-
+        # DataFrame, übertragen wird aber nur jeder n-te Punkt (stride).
+        # Gesucht ist deshalb der nächstgelegene tatsächlich übertragene
+        # Punkt - bei stride = 1 ist das exakt derselbe Punkt.
+        splits = []
+        for n, raw_idx in enumerate(sorted((split_points or {}).get(track_id, [])), start=1):
+            if not 0 <= raw_idx < len(gdf):
+                continue
+            pos = int(np.searchsorted(idx, raw_idx))
+            if pos >= len(idx):
+                pos = len(idx) - 1
+            elif pos > 0 and abs(idx[pos - 1] - raw_idx) <= abs(idx[pos] - raw_idx):
+                pos -= 1
+            splits.append({"i": pos, "n": n})
+
         time_passed = sub["time_passed"]
         seconds = (
             time_passed.dt.total_seconds()
@@ -251,6 +284,7 @@ def _build_payload(
             "slope": _clean(sub["slope"], 1),
             "km": _clean(cum_m[idx] / 1000.0, 4),
             "sec": _clean(seconds, 0),
+            "splits": splits,
         })
 
     # Wertebereich der Farbskala aus den gespeicherten Kennzahlen (identisch
@@ -558,6 +592,13 @@ T.forEach(t => {
   L.circleMarker([t.lat[n - 1], t.lon[n - 1]], { radius: 7, weight: 2, color: "#fff",
     fillColor: "#d00000", fillOpacity: 1, renderer: renderer })
     .bindTooltip("Ende: " + esc(t.title)).addTo(map);
+  /* Unterteilungspunkte des Planungsmodus (orange, wie auf der Seite
+     "Karte"). Gesetzt werden sie dort - hier werden sie nur angezeigt. */
+  (t.splits || []).forEach(s => {
+    L.circleMarker([t.lat[s.i], t.lon[s.i]], { radius: 8, weight: 2, color: "#fff",
+      fillColor: "#ff8c00", fillOpacity: 1, renderer: renderer })
+      .bindTooltip("Trennpunkt " + s.n + ": " + (t.km[s.i] || 0).toFixed(2) + " km").addTo(map);
+  });
 });
 
 /* Hover-Marker: folgt dem Profil bzw. der Maus. */
@@ -665,6 +706,56 @@ function showPoint(g) {
     + '<span><span class="k">Zeit</span> <span class="v">' + fmtDur(t.sec[i]) + "</span></span>";
 }
 
+/* ---------------------------------------------------------------------
+   6b. Marker IM HÖHENPROFIL: Start (grün), Ende (rot) und - sofern im
+       Planungsmodus gesetzt - die Unterteilungspunkte (orange, nummeriert).
+       Damit zeigen Karte und Profil dieselben Punkte; auf der Karte sind
+       es Leaflet-Marker (s.o.), im Profil wird direkt auf das
+       uPlot-Canvas gezeichnet (draw-Hook). Eine eigene uPlot-Serie wäre
+       teurer: sie bräuchte ein weiteres Array der Länge N je Marker-Sorte.
+   --------------------------------------------------------------------- */
+const PMARKS = [];
+T.forEach(t => {
+  const n = t.km.length;
+  PMARKS.push({ x: t.km[0], y: t.ele[0], c: "#00a000", lab: "S" });
+  PMARKS.push({ x: t.km[n - 1], y: t.ele[n - 1], c: "#d00000", lab: "Z" });
+  (t.splits || []).forEach(s =>
+    PMARKS.push({ x: t.km[s.i], y: t.ele[s.i], c: "#ff8c00", lab: String(s.n) }));
+});
+function drawMarks(uu) {
+  if (!PMARKS.length) return;
+  const ctx = uu.ctx, bb = uu.bbox;
+  /* Canvas-Pixel je CSS-Pixel: Strichstärken/Radien müssen mitskalieren,
+     sonst sind die Marker auf hochauflösenden Bildschirmen zu klein. */
+  const pr = (uu.ctx.canvas.height / uu.height) || 1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(bb.left, bb.top, bb.width, bb.height);
+  ctx.clip();
+  PMARKS.forEach(m => {
+    if (m.x === null || m.x === undefined) return;
+    const x = uu.valToPos(m.x, "x", true);
+    if (x < bb.left - 1 || x > bb.left + bb.width + 1) return;   /* außerhalb des Zooms */
+    const yBase = bb.top + bb.height;
+    const y = (m.y === null || m.y === undefined) ? yBase : uu.valToPos(m.y, "y", true);
+    ctx.setLineDash([4 * pr, 3 * pr]);
+    ctx.strokeStyle = m.c;
+    ctx.lineWidth = 1.5 * pr;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, yBase); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(x, y, 5 * pr, 0, 2 * Math.PI);
+    ctx.fillStyle = m.c; ctx.fill();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2 * pr; ctx.stroke();
+    ctx.font = "bold " + (11 * pr) + "px system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.lineWidth = 3 * pr; ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.strokeText(m.lab, x, y - 8 * pr);
+    ctx.fillStyle = m.c;
+    ctx.fillText(m.lab, x, y - 8 * pr);
+  });
+  ctx.restore();
+}
+
 const profileEl = document.getElementById("profile");
 const plotWidth = () => Math.max(320, profileEl.clientWidth || 0);
 let syncing = false;   /* verhindert Rückkopplung Karte <-> Profil */
@@ -688,6 +779,9 @@ const u = new uPlot({
     })),
   ],
   hooks: {
+    /* Nach dem Zeichnen der Kurven: Start-/End-/Trennpunkt-Marker
+       obendrauf (siehe drawMarks). */
+    draw: [uu => drawMarks(uu)],
     /* Hover im Profil -> Marker auf der Karte */
     setCursor: [uu => {
       const idx = uu.cursor.idx;
@@ -854,13 +948,25 @@ def render_linked_map_page(settings_container=None) -> None:
                 help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
             )
 
+    # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
+    # Punkt-Indizes) - dieselbe Ablage wie auf der Seite "Karte"; hier nur
+    # defensiv angelegt, falls diese Seite zuerst aufgerufen wird.
+    st.session_state.setdefault("split_points", {})
+
     # Dieselben Filter wie auf der Seite "Karte" (gemeinsame Widget-Keys,
     # die Auswahl bleibt beim Seitenwechsel also erhalten).
     meta = render_track_filters()
 
+    # Ebenso der Planungsmodus-Schalter: gemeinsamer Widget-Key
+    # 'planning_mode', der Modus bleibt beim Seitenwechsel also erhalten.
+    # Gesetzt werden die Punkte auf der Seite "Karte" (die Komponente hier
+    # meldet nichts an Streamlit zurück), angezeigt werden sie auf beiden.
+    planning_active = render_planning_toggle(meta["track_id"].tolist())
+
     # Erst jetzt die (großen) GPX-Binärdaten der ausgewählten Tracks laden.
     file_data = load_track_files(tuple(sorted(meta["track_id"].tolist())))
     df = meta.merge(file_data, on="track_id", how="inner")
+    planning_active = planning_active and len(df) == 1
 
     map_height, profile_height = _resolve_map_profile_height()
 
@@ -869,16 +975,35 @@ def render_linked_map_page(settings_container=None) -> None:
 
     with col_kpis:
         with st.container(border=True):
-            _render_kpis(df)
+            if planning_active:
+                # Kennzahlen je Teil, Punkteliste und ZIP-Export - identisch
+                # zur Seite "Karte" (process_track ist gecacht, der Aufruf
+                # innerhalb von _build_payload kostet also nicht doppelt).
+                track_id = df["track_id"].iloc[0]
+                _render_planning_kpis(
+                    process_track(track_id, df["file_data"].iloc[0]),
+                    track_id,
+                    df["track_title"].iloc[0],
+                )
+            else:
+                _render_kpis(df)
 
     with col_map:
         with st.container(border=True):
+            if planning_active:
+                st.caption(
+                    "📐 Planungsmodus: Die Trennpunkte werden in Karte und "
+                    "Höhenprofil angezeigt (orange, nummeriert; Start = S, "
+                    "Ende = Z). Gesetzt und gelöscht werden sie auf der Seite "
+                    "\"Karte\" oder über das \"✕\" in der Punkteliste links."
+                )
             payload = _build_payload(
                 df,
                 st.session_state.lm_plot_column,
                 st.session_state.lm_basemap,
                 map_height,
                 profile_height,
+                split_points=st.session_state.split_points if planning_active else None,
             )
             # +48 px für die Werte-Leiste über der Karte (und ggf. den
             # Fehlerbalken); ohne Aufschlag schneidet der iframe das Profil

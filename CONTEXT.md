@@ -21,7 +21,8 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigation,
                "Beenden"-Knopf (Abschiedsseite + functions.shutdown_app())
 ├── map.py     Seite "Karte"      -> render_map_page(settings_container=None)
-│              zusätzlich: render_track_filters() - Sidebar-Filter, von
+│              zusätzlich: render_track_filters() - Sidebar-Filter und
+│              render_planning_toggle() - Schalter "📐 Planung", beide von
 │              beiden Kartenseiten genutzt
 ├── map_linked.py  Seite "Karte (Sync)" -> render_linked_map_page(settings_container=None)
 │              Karte + Profil als EINE HTML/JS-Komponente (Leaflet + uPlot)
@@ -104,8 +105,9 @@ führendem Unterstrich.
 - Karte/Profil: `selected_point`, `my_chart_key`
 - Karte (Sync): `lm_plot_column`, `lm_basemap` (Anzeigeeinstellungen
   `kpi_col_width_pct`, `map_profile_height_mode`,
-  `map_profile_total_height_px` sowie alle Filter-Keys werden mit der
-  Seite "Karte" geteilt, damit die Auswahl beim Seitenwechsel steht)
+  `map_profile_total_height_px` sowie alle Filter-Keys UND `planning_mode`/
+  `split_points` werden mit der Seite "Karte" geteilt, damit Auswahl und
+  Planung beim Seitenwechsel stehen bleiben)
 - Planung: `planning_mode`, `split_points`, `_last_planning_click`,
   `_last_planning_map_click`, `_last_track_ids`
 - Beenden: `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
@@ -140,6 +142,7 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Neue Seite | Modul mit `render_*_page()` + Eintrag in `pages` in `app.py` |
 | Verhalten beim Beenden | `shutdown_app()`/`close_connection()` in `functions.py`, UI-Teil am Ende von `app.py` |
 | Filter der Kartenseiten | `render_track_filters()` in `map.py` (wirkt auf beide Karten) |
+| Planungs-Schalter | `render_planning_toggle()` in `map.py` (wirkt auf beide Karten) |
 | Interaktion Karte/Profil ohne Rerun | JS-Vorlage `_HTML_TEMPLATE` in `map_linked.py` |
 | Änderung am GPX-Parsing | `process_gpx_dataframe()` (pro Punkt) |
 
@@ -176,11 +179,19 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
 - Die Bibliotheken werden per `loadScript()` nachgeladen (nicht als
   `<script src>` im Dokument), damit ein nicht erreichbares CDN eine
   Meldung ergibt statt "X is not defined". Zweites CDN als Ausweichweg.
+- Marker im Profil (Start `S`, Ende `Z`, Trennpunkte orange/nummeriert)
+  werden im `draw`-Hook direkt auf das uPlot-Canvas gezeichnet, nicht als
+  eigene Serie - eine Serie bräuchte je Marker-Sorte ein weiteres Array der
+  Länge N. Die Trennpunkt-Indizes beziehen sich auf das volle DataFrame und
+  werden in `_build_payload()` per `np.searchsorted` auf den nächsten
+  tatsächlich übertragenen (ausgedünnten) Punkt abgebildet.
 - Die Komponente ist eine **Einbahnstraße**: kein Rückkanal nach
-  Streamlit. Alles, was Serverzustand braucht (Planungsmodus,
-  GPX-Export), bleibt auf der Seite "Karte". Ein Rückkanal bräuchte eine
-  echte bidirektionale Custom Component (Frontend-Build) oder
-  `streamlit-javascript`.
+  Streamlit. Trennpunkte werden hier nur **angezeigt**; gesetzt/gelöscht
+  werden sie auf der Seite "Karte" bzw. über die Punkteliste in der
+  Kennzahlen-Spalte. Schalter (`map.render_planning_toggle()`), Kennzahlen
+  je Teil und GPX-Export gibt es auf beiden Seiten. Ein Rückkanal für das
+  Setzen per Klick bräuchte eine echte bidirektionale Custom Component
+  (Frontend-Build) oder `streamlit-javascript`.
 - Keine neuen Python-Abhängigkeiten; die beiden JS-Bibliotheken kommen
   versionsgepinnt vom CDN (`_CDN_*`).
 

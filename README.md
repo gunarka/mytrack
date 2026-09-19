@@ -19,7 +19,7 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 | `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
 | `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion sowie der Planungsmodus. |
-| `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter und Kennzahlen wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
+| `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter, Kennzahlen und den Planungs-Schalter wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
 `map.py`, `map_linked.py`, `stats.py` und `admin.py` stellen jeweils eine
@@ -174,7 +174,8 @@ Geo-Berechnung nötig.
 Ein Klick auf einen Punkt im Höhenprofil zentriert die Karte auf den
 entsprechenden Ort.
 
-**Planung** (Schalter "📐 Planung" in der Seitenleiste):
+**Planung** (Schalter "📐 Planung" in der Seitenleiste, auf **beiden**
+Kartenseiten vorhanden):
 
 Ist genau **ein** Track ausgewählt, lässt sich der Planungsmodus
 einschalten. Darin wird der Track per Mausklick – auf die Karte oder ins
@@ -186,6 +187,9 @@ Höhenprofil – in Teile unterteilt:
 - Die Kennzahlen-Box zeigt statt der Werte je Track die Werte je Teil.
 - "📦 Export" lädt eine ZIP-Datei mit je einer GPX-Datei pro Teil sowie
   einer weiteren GPX-Datei mit den Unterteilungspunkten als Wegpunkte.
+- Die gesetzten Punkte erscheinen orange und nummeriert auf Karte und
+  Höhenprofil – auch auf der Seite "Karte (Sync)" (dort nur zur Anzeige,
+  siehe unten).
 
 Wird ein zweiter Track dazu ausgewählt, schaltet sich der Modus
 automatisch wieder ab.
@@ -213,6 +217,10 @@ Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
   automatisch auf genau diesen Abschnitt mit. "Alles zeigen" (oben rechts
   im Profil) setzt beides zurück.
 - **Klick ins Profil** zentriert die Karte auf den Punkt.
+- **Marker im Höhenprofil:** Start ("S", grün), Ende ("Z", rot) und – im
+  Planungsmodus – die Unterteilungspunkte (orange, nummeriert), jeweils
+  mit senkrechter Hilfslinie. Dieselben Punkte liegen an derselben Stelle
+  auf der Karte.
 - Tritt im Browser ein Fehler auf (Bibliothek nicht ladbar, Kachelserver
   nicht erreichbar), erscheint dazu ein roter Hinweis oben in der
   Komponente – statt einer wortlos leeren Karte.
@@ -222,9 +230,13 @@ Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
 - In den Einstellungen lässt sich zusätzlich die Hintergrundkarte wählen
   (OpenTopoMap, OpenStreetMap, Carto Positron).
 
-Der **Planungsmodus** (Unterteilungspunkte, Export) bleibt bewusst auf der
-Seite "Karte": Er braucht Serverzustand, während diese Seite vollständig
-im Browser läuft und nichts an Streamlit zurückmeldet.
+Der **Planungsmodus** lässt sich auch hier über den Schalter "📐 Planung"
+einschalten: Die Kennzahlen je Teil, die Punkteliste (mit "✕" zum Löschen)
+und der ZIP-Export stehen wie auf der Seite "Karte" links, die Trennpunkte
+erscheinen in Karte und Höhenprofil. **Neue Punkte per Klick setzen** geht
+dagegen nur auf der Seite "Karte": Das braucht Serverzustand, während die
+Komponente hier vollständig im Browser läuft und nichts an Streamlit
+zurückmeldet.
 
 **Statistik** (Seite "Statistik"):
 
