@@ -15,10 +15,10 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 | Datei            | Zweck                                                                 |
 |------------------|------------------------------------------------------------------------|
 | `app.py`         | **Einstiegspunkt** (`streamlit run app.py`). Seitenkonfiguration, Titel/Beschreibung in der Seitenleiste, Navigation zwischen den Seiten. |
-| `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, Bestzeiten-Auswertung, GPX-Export, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen von Karte und Statistik (`load_metadata`, `load_track_files`, `load_heatmap_points`). Enthält keinerlei Oberflächen-Code. |
+| `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, Bestzeiten-Auswertung, GPX-Export, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen von Karte und Statistik (`load_metadata`, `load_track_files`, `load_track_notes`, `load_heatmap_points`). Enthält keinerlei Oberflächen-Code. |
 | `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
-| `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl, Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion sowie der Planungsmodus. |
+| `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl (Touren eingeklappt), Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion, die Info-Punkte sowie der Planungsmodus. |
 | `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter, Kennzahlen und den Planungs-Schalter wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
@@ -50,10 +50,14 @@ der Verwaltung sofort auf der Karte sichtbar sind.
 ## Datenmodell
 
 Lokale [DuckDB](https://duckdb.org/)-Datei unter `.data/tracks.duckdb` mit
-drei Tabellen:
+vier Tabellen:
 
 - **`sport`** – Sportarten (`sport_id`, `sport_title`)
 - **`tours`** – Touren (`tour_id`, `tour_title`)
+- **`track_notes`** – Info-Punkte zu einem Track (`note_id`, `track_id`,
+  Titel, Beschreibung, Art, `lat`/`lon`, Höhe, `point_index`). Sie
+  unterteilen den Track nicht, müssen nicht auf ihm liegen und werden
+  beim Export als Wegpunkte mitgegeben (siehe "Punkte zur Tour" unten).
 - **`gpx`** – Tracks: Titel, Zuordnung zu Sport/Tour, Start-/Endadresse
   (per Reverse-Geocoding ermittelt), Zeitzone, Kennzahlen (Distanz, Dauer,
   Zeit in Bewegung, Auf-/Abstieg, Min/Max von Höhe/Tempo/Steigung) sowie
@@ -72,6 +76,12 @@ drei Tabellen:
 Die Zuordnung eines Tracks zu Sport bzw. Tour ist **optional**: Wird eine
 Sportart oder Tour gelöscht, bleiben die zugehörigen Tracks erhalten und
 verlieren lediglich die Zuordnung (`sport_id`/`tour_id` wird `NULL`).
+Die Info-Punkte eines Tracks werden dagegen mit ihm gelöscht – ohne
+seinen Streckenverlauf hätten sie keinen Bezug mehr.
+
+Neue Tabellen und Spalten werden bei jedem Verbindungsaufbau sanft
+nachgezogen (`_ensure_schema_migrations()`); `init.py` ist dafür **nicht**
+nötig (es würde alle Daten löschen).
 
 ## Installation & Start
 
@@ -150,10 +160,15 @@ die zur vorherigen Auswahl passenden Optionen). Der Land-Filter basiert
 auf dem per Reverse-Geocoding ermittelten Start- und Endland eines Tracks;
 Tracks mit Grenzübertritt (Start- und Endland unterschiedlich) erscheinen
 unter beiden Ländern. Darunter die eigentliche Track-Auswahl als
-aufklappbare Liste nach Jahr, darin gruppiert nach Monat und Tour. Ein
-Klick auf die Checkbox einer Tour wählt alle ihre Tracks innerhalb dieser
-Jahr/Monat-Gruppe auf einmal aus; einzelne Tracks lassen sich daneben auch
-gezielt einzeln (ab-)wählen. Es muss mindestens ein Track ausgewählt sein.
+aufklappbare Liste nach Jahr, darin gruppiert nach Monat.
+
+Eine **Tour steht dort als EINE Zeile** – eingeklappt, mit Titel, Anzahl
+der Etappen und Zeitraum (z. B. `🧭 Alpenüberquerung (6) · 12.07.–17.07.`).
+Ein Klick auf ihre Checkbox wählt alle Etappen auf einmal aus; der
+`▸`-Knopf davor klappt die einzelnen Tracks auf, die sich dann auch
+einzeln (ab-)wählen lassen. Eine Tour erscheint je Jahr genau **einmal**,
+einsortiert unter dem Monat ihrer ersten Etappe – auch wenn sie über
+einen Monatswechsel läuft. Es muss mindestens ein Track ausgewählt sein.
 Zusätzlich kann oben eine Farb-Spalte für das Höhenprofil gewählt werden
 (Höhe, Geschwindigkeit, Gefälle oder einfarbig).
 
@@ -186,8 +201,9 @@ Höhenprofil – in Teile unterteilt:
   nächstgelegene Trackpunkt verwendet), ein erneuter Klick auf denselben
   Punkt entfernt ihn wieder; alternativ über das "✕" in der Punkteliste.
 - Die Kennzahlen-Box zeigt statt der Werte je Track die Werte je Teil.
-- "📦 Export" lädt eine ZIP-Datei mit je einer GPX-Datei pro Teil sowie
-  einer weiteren GPX-Datei mit den Unterteilungspunkten als Wegpunkte.
+- "📦 Export" lädt eine ZIP-Datei: je eine GPX-Datei pro Teil (mitsamt den
+  Info-Punkten des jeweiligen Abschnitts), eine GPX-Datei mit den
+  Trennpunkten und eine mit allen Info-Punkten als Wegpunkte.
 - Die gesetzten Punkte erscheinen orange und nummeriert auf Karte und
   Höhenprofil – auch auf der Seite "Karte (Sync)" (dort nur zur Anzeige,
   siehe unten).
@@ -195,13 +211,43 @@ Höhenprofil – in Teile unterteilt:
 Wird ein zweiter Track dazu ausgewählt, schaltet sich der Modus
 automatisch wieder ab.
 
+### Punkte zur Tour (Info-Punkte)
+
+Unterhalb der Kennzahlen liegt der Bereich **"📍 Punkte zur Tour"**:
+dauerhaft gespeicherte Anmerkungen zu einem Track – Hütte, Aussicht,
+Wasserstelle, Abzweig, Gefahrenstelle.
+
+- Sie **unterteilen den Track nicht** (das tun die Trennpunkte des
+  Planungsmodus) und müssen **nicht auf dem Track liegen** – die Hütte
+  steht selten genau auf der Spur.
+- Angelegt werden sie bei genau **einem** ausgewählten Track, sowohl im
+  normalen Betrieb als auch im Planungsmodus, über "➕ Punkt hinzufügen"
+  (Titel, Beschreibung, Koordinaten).
+- Die Position lässt sich direkt eingeben oder – mit der Checkbox
+  **"Position per Kartenklick"** – per Klick auf die Karte übernehmen;
+  die vorgemerkte Stelle erscheint solange als grauer Marker. Im
+  Planungsmodus hat diese Einstellung Vorrang: Der Kartenklick setzt dann
+  keinen Trennpunkt mehr, das geht währenddessen über das Höhenprofil.
+- Angezeigt werden sie immer und auf beiden Kartenseiten: als blauer
+  Marker auf der Karte (Titel und Text im Popup) und als blaue Raute im
+  Höhenprofil, an der Kilometer-Stelle des nächstgelegenen Trackpunkts.
+- Jeder Punkt lässt sich über sein Aufklapp-Feld ändern oder löschen.
+- **Export:** Sie hängen als Wegpunkte (`<wpt>`) an jedem Export des
+  zugehörigen Tracks – "⬇️ GPX herunterladen" in der Verwaltung, "Tour als
+  GPX exportieren" sowie dem ZIP des Planungsmodus.
+
 ### Anzeigeeinstellungen
 
 Im Bereich "⚙️ Einstellungen" der Seitenleiste (zusammen mit der
 Navigation): Farb-Spalte für Karte und Höhenprofil, Breite der
-Kennzahlen-Spalte sowie die Höhe von Karte + Profil – wahlweise
-automatisch an die Browser-Fensterhöhe angepasst oder manuell per
-Schieberegler.
+Kennzahlen-Spalte sowie die Höhe von Karte + Profil. Für die Höhe gibt es
+drei Modi:
+
+| Modus | Verhalten |
+|---|---|
+| **Fenster füllen** (Standard) | Karte und Profil füllen zusammen die Fensterhöhe. Das Höhenprofil behält die eingestellte Pixelhöhe, die Karte bekommt den Rest bis zum unteren Fensterrand. Wirkt sofort beim ersten Laden und zieht beim Ändern der Fenstergröße live mit; die Kennzahlen-Spalte scrollt bei Bedarf in sich selbst, statt die Seite zu verlängern. |
+| **Fensterhöhe messen (JS)** | Liest die Fensterhöhe per JavaScript aus und rechnet daraus feste Pixelwerte. Braucht immer einen zusätzlichen Durchlauf und aktualisiert sich nach einer Größenänderung erst bei der nächsten Interaktion – nur noch als Ausweichweg gedacht. |
+| **Manuell (px)** | Feste Gesamthöhe per Schieberegler. |
 
 **Karte (Sync)** (Seite "Karte (Sync)"):
 
@@ -218,10 +264,10 @@ Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
   automatisch auf genau diesen Abschnitt mit. "Alles zeigen" (oben rechts
   im Profil) setzt beides zurück.
 - **Klick ins Profil** zentriert die Karte auf den Punkt.
-- **Marker im Höhenprofil:** Start ("S", grün), Ende ("Z", rot) und – im
-  Planungsmodus – die Unterteilungspunkte (orange, nummeriert), jeweils
-  mit senkrechter Hilfslinie. Dieselben Punkte liegen an derselben Stelle
-  auf der Karte.
+- **Marker im Höhenprofil:** Start ("S", grün), Ende ("Z", rot), die
+  Info-Punkte ("i", blau) und – im Planungsmodus – die Trennpunkte
+  (orange, nummeriert), jeweils mit senkrechter Hilfslinie. Dieselben
+  Punkte liegen an derselben Stelle auf der Karte.
 - Tritt im Browser ein Fehler auf (Bibliothek nicht ladbar, Kachelserver
   nicht erreichbar), erscheint dazu ein roter Hinweis oben in der
   Komponente – statt einer wortlos leeren Karte.
@@ -237,7 +283,9 @@ und der ZIP-Export stehen wie auf der Seite "Karte" links, die Trennpunkte
 erscheinen in Karte und Höhenprofil. **Neue Punkte per Klick setzen** geht
 dagegen nur auf der Seite "Karte": Das braucht Serverzustand, während die
 Komponente hier vollständig im Browser läuft und nichts an Streamlit
-zurückmeldet.
+zurückmeldet. Aus demselben Grund fehlt hier die Option "Position per
+Kartenklick" – Info-Punkte lassen sich aber über ihre Koordinatenfelder
+auch auf dieser Seite anlegen und ändern.
 
 **Statistik** (Seite "Statistik"):
 

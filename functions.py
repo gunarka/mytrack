@@ -11,8 +11,9 @@ wird (app.py, admin.py, map.py, init.py):
       (Abschnitt "GPX-Verarbeitung")
     - Reverse-Geocoding und Zeitzonen-Ermittlung für einen Punkt
       (Abschnitt "Geocoding & Zeitzone")
-    - CRUD-Funktionen (Create/Read/Update/Delete) für die drei Tabellen
-      'sport', 'tours' und 'gpx' (Abschnitt "CRUD: ...")
+    - CRUD-Funktionen (Create/Read/Update/Delete) für die Tabellen
+      'sport', 'tours' und 'gpx' (Abschnitt "CRUD: ...") sowie für die
+      Info-Punkte in 'track_notes' (Abschnitt "Info-Punkte")
 
 Durch die Bündelung an einer Stelle enthalten admin.py und map.py nur noch
 UI-Code; die eigentliche Logik bzw. der Datenbankzugriff steht hier EINMAL,
@@ -72,6 +73,35 @@ BEST_EFFORT_DISTANCES = [
 ]
 
 
+# Tabellendefinition der Info-Punkte ("Punkte zur Tour"): frei platzierbare
+# Anmerkungen zu einem Track (Hütte, Aussicht, Wasserstelle, Achtung ...).
+# Sie unterteilen den Track NICHT (das tun die Unterteilungspunkte des
+# Planungsmodus, die nur im Sitzungszustand leben), sondern tragen
+# Informationen - und müssen deshalb auch nicht exakt auf dem Track liegen.
+# An EINER Stelle definiert, weil sie sowohl beim Neuanlegen der Datenbank
+# (init_database) als auch bei der sanften Migration bestehender Datenbanken
+# (_ensure_schema_migrations) gebraucht wird.
+#
+# 'point_index' ist der Index des NÄCHSTGELEGENEN Trackpunkts (bezogen auf
+# das von process_track() aufbereitete DataFrame). Er wird beim Anlegen
+# einmal bestimmt und gespeichert, damit der Punkt im Höhenprofil ohne
+# erneute Nachbarschaftssuche an der richtigen Kilometer-Stelle erscheint.
+_TRACK_NOTES_DDL = """
+    CREATE TABLE track_notes (
+        note_id     UUID NOT NULL,
+        track_id    UUID NOT NULL,
+        note_title  VARCHAR,
+        note_text   VARCHAR,
+        note_kind   VARCHAR,      -- 'info' (normal) oder 'planning' (im Planungsmodus angelegt)
+        lat         DOUBLE,
+        lon         DOUBLE,
+        ele         DOUBLE,
+        point_index INTEGER,
+        time_stamp  TIMESTAMP
+    )
+"""
+
+
 # ---------------------------------------------------------------------------
 # Datenbank
 # ---------------------------------------------------------------------------
@@ -106,7 +136,8 @@ def _ensure_schema_migrations(con: duckdb.DuckDBPyConnection) -> None:
     Sanfte Schema-Migration für bereits bestehende, schon befüllte
     Datenbanken: ergänzt nachträglich eingeführte Spalten der Tabelle
     'gpx', falls sie noch fehlen (z.B. 'track_time_moving_s' für "Zeit in
-    Bewegung").
+    Bewegung"), und legt nachträglich eingeführte Tabellen an (Info-Punkte,
+    siehe _TRACK_NOTES_DDL).
 
     Wird bei JEDEM Verbindungsaufbau aufgerufen, ist also ein no-op, sobald
     die Spalte einmal existiert. Dadurch müssen Bestandsnutzer ihre Daten
@@ -116,6 +147,11 @@ def _ensure_schema_migrations(con: duckdb.DuckDBPyConnection) -> None:
     init.py), passiert ebenfalls nichts - init_database() legt sie dann
     direkt inklusive aller aktuellen Spalten an.
     """
+    # Info-Punkte: als eigene Tabelle nachgereicht, deshalb hier vor der
+    # gpx-Prüfung - sie muss auch dann existieren, wenn 'gpx' (noch) leer
+    # ist bzw. fehlt. "IF NOT EXISTS" macht den Aufruf zum no-op.
+    con.sql(_TRACK_NOTES_DDL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"))
+
     table_exists = con.sql(
         "SELECT 1 FROM information_schema.tables WHERE table_name = 'gpx'"
     ).fetchone()
@@ -192,7 +228,7 @@ def shutdown_app(delay_s: float = 1.5) -> None:
 
 def init_database() -> None:
     """
-    Legt die drei Tabellen 'gpx', 'tours' und 'sport' neu an.
+    Legt die vier Tabellen 'gpx', 'tours', 'sport' und 'track_notes' neu an.
 
     ACHTUNG: Bereits vorhandene Tabellen (und alle enthaltenen Daten!)
     werden vorher gelöscht. Diese Funktion wird ausschließlich über das
@@ -205,6 +241,7 @@ def init_database() -> None:
     con.sql("DROP TABLE IF EXISTS gpx")
     con.sql("DROP TABLE IF EXISTS tours")
     con.sql("DROP TABLE IF EXISTS sport")
+    con.sql("DROP TABLE IF EXISTS track_notes")
 
     con.sql("""
         CREATE TABLE gpx (
@@ -272,6 +309,8 @@ def init_database() -> None:
             sport_title VARCHAR
         )
     """)
+
+    con.sql(_TRACK_NOTES_DDL)
 
     _invalidate_track_caches()
 
@@ -652,6 +691,11 @@ def get_track_file(track_id: str) -> tuple[str, bytes] | None:
     Liefert die ursprünglich hochgeladene GPX-Datei eines Tracks als
     (Dateiname, Bytes) - für den Download-Knopf in der Verwaltung. Gibt
     None zurück, falls der Track nicht existiert.
+
+    Sind zu dem Track Info-Punkte erfasst (siehe Abschnitt "Info-Punkte"),
+    werden sie als Wegpunkte (<wpt>) angehängt, damit sie zusammen mit dem
+    Track im Zielprogramm ankommen. Ohne Info-Punkte bleiben die Rohbytes
+    unverändert.
     """
     con = get_connection()
     row = con.execute(
@@ -662,7 +706,7 @@ def get_track_file(track_id: str) -> tuple[str, bytes] | None:
     file_name = row[0] or f"{track_id}.gpx"
     if not file_name.lower().endswith(".gpx"):
         file_name = f"{file_name}.gpx"
-    return file_name, bytes(row[1])
+    return file_name, _with_note_waypoints(bytes(row[1]), (str(track_id),))
 
 
 def export_tour_gpx(tour_id: str) -> bytes | None:
@@ -685,7 +729,7 @@ def export_tour_gpx(tour_id: str) -> bytes | None:
     con = get_connection()
     rows = con.execute(
         """
-        SELECT track_title, file_data
+        SELECT track_id, track_title, file_data
         FROM gpx
         WHERE tour_id = ?
         ORDER BY time_start NULLS LAST
@@ -703,13 +747,172 @@ def export_tour_gpx(tour_id: str) -> bytes | None:
     merged = gpxpy.gpx.GPX()
     track = gpxpy.gpx.GPXTrack(name=name)
     merged.tracks.append(track)
-    for track_title, file_data in rows:
+    for track_id, track_title, file_data in rows:
         source = gpxpy.parse(bytes(file_data).decode("utf-8", errors="replace"))
         for source_track in source.tracks:
             for segment in source_track.segments:
                 if segment.points:
                     track.segments.append(segment)
+
+    # Info-Punkte ALLER Tracks dieser Tour als Wegpunkte mitgeben (siehe
+    # Abschnitt "Info-Punkte"): Die Tour-Datei enthält damit dieselben
+    # Anmerkungen wie die Einzeltracks, aus denen sie zusammengesetzt ist.
+    merged.waypoints.extend(
+        build_note_waypoints(load_track_notes(tuple(str(row[0]) for row in rows)))
+    )
     return merged.to_xml().encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Info-Punkte ("Punkte zur Tour")
+# ---------------------------------------------------------------------------
+# Frei platzierbare Anmerkungen zu einem Track (siehe _TRACK_NOTES_DDL).
+# Abgrenzung zu den Unterteilungspunkten des Planungsmodus: Jene zerschneiden
+# einen Track in Teile und leben nur im Sitzungszustand, diese hier tragen
+# Informationen, liegen dauerhaft in der Datenbank und müssen nicht exakt auf
+# dem Track liegen. Beim Export werden sie als GPX-Wegpunkte (<wpt>) an den
+# zugehörigen Track angehängt.
+NOTE_KIND_LABELS = {"info": "Info", "planning": "Planung"}
+
+
+@st.cache_data(show_spinner=False)
+def load_track_notes(track_ids: tuple) -> pd.DataFrame:
+    """
+    Lädt die Info-Punkte der übergebenen Tracks, sortiert nach Track und
+    Position auf dem Track (point_index).
+
+    Gecacht wie die übrigen Leseabfragen der Kartenseite; jede schreibende
+    Funktion leert den Cache über _invalidate_track_caches(). Ohne
+    track_ids wird ein leeres DataFrame mit den richtigen Spalten
+    zurückgegeben, damit aufrufender Anzeige-Code nicht auf fehlende
+    Spalten prüfen muss.
+    """
+    columns = [
+        "note_id", "track_id", "note_title", "note_text", "note_kind",
+        "lat", "lon", "ele", "point_index", "time_stamp",
+    ]
+    if not track_ids:
+        return pd.DataFrame(columns=columns)
+
+    con = get_connection()
+    placeholders = ",".join(["?"] * len(track_ids))
+    query = f"""
+        SELECT {", ".join(columns)}
+        FROM track_notes
+        WHERE track_id IN ({placeholders})
+        ORDER BY track_id, point_index
+    """
+    return con.execute(query, list(track_ids)).fetchdf()
+
+
+def insert_track_note(
+    track_id: str,
+    note_title: str,
+    note_text: str,
+    lat: float,
+    lon: float,
+    ele: float | None,
+    point_index: int,
+    note_kind: str = "info",
+) -> str:
+    """Legt einen neuen Info-Punkt an und gibt dessen neue ID zurück."""
+    con = get_connection()
+    note_id = str(uuid.uuid4())
+    con.execute(
+        """
+        INSERT INTO track_notes
+            (note_id, track_id, note_title, note_text, note_kind,
+             lat, lon, ele, point_index, time_stamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            note_id, str(track_id), note_title, note_text, note_kind,
+            float(lat), float(lon),
+            None if ele is None or not np.isfinite(ele) else float(ele),
+            int(point_index), datetime.datetime.now(),
+        ],
+    )
+    _invalidate_track_caches()
+    return note_id
+
+
+def update_track_note(
+    note_id: str,
+    note_title: str,
+    note_text: str,
+    lat: float,
+    lon: float,
+    ele: float | None,
+    point_index: int,
+) -> None:
+    """Ändert Text und/oder Position eines bestehenden Info-Punkts."""
+    con = get_connection()
+    con.execute(
+        """
+        UPDATE track_notes
+        SET note_title = ?, note_text = ?, lat = ?, lon = ?, ele = ?, point_index = ?
+        WHERE note_id = ?
+        """,
+        [
+            note_title, note_text, float(lat), float(lon),
+            None if ele is None or not np.isfinite(ele) else float(ele),
+            int(point_index), str(note_id),
+        ],
+    )
+    _invalidate_track_caches()
+
+
+def delete_track_note(note_id: str) -> None:
+    """Löscht einen Info-Punkt unwiderruflich."""
+    con = get_connection()
+    con.execute("DELETE FROM track_notes WHERE note_id = ?", [str(note_id)])
+    _invalidate_track_caches()
+
+
+def build_note_waypoints(notes: pd.DataFrame) -> list:
+    """
+    Wandelt Info-Punkte in GPX-Wegpunkte (<wpt>) um - der gemeinsame Weg,
+    auf dem sie in JEDEN Export gelangen (Einzeltrack, Tour, Planungs-ZIP).
+
+    Titel landet in <name>, der Freitext in <desc>, die Art (Info/Planung)
+    in <type>. Fehlt die Höhe, bleibt <ele> weg - gängige Programme kommen
+    damit besser zurecht als mit einer erfundenen 0.
+    """
+    waypoints = []
+    if notes is None or notes.empty:
+        return waypoints
+    for _, note in notes.iterrows():
+        if pd.isna(note["lat"]) or pd.isna(note["lon"]):
+            continue
+        waypoints.append(
+            gpxpy.gpx.GPXWaypoint(
+                latitude=float(note["lat"]),
+                longitude=float(note["lon"]),
+                elevation=None if pd.isna(note["ele"]) else float(note["ele"]),
+                name=note["note_title"] or "Punkt",
+                description=None if pd.isna(note["note_text"]) else note["note_text"],
+                type=NOTE_KIND_LABELS.get(note["note_kind"], None),
+            )
+        )
+    return waypoints
+
+
+def _with_note_waypoints(gpx_bytes: bytes, track_ids: tuple) -> bytes:
+    """
+    Hängt die Info-Punkte der genannten Tracks als Wegpunkte an eine
+    fertige GPX-Datei an und gibt sie neu serialisiert zurück.
+
+    Gibt es keine Punkte, werden die Rohbytes UNVERÄNDERT zurückgegeben:
+    Ein überflüssiges Parsen/Neuschreiben würde die Originaldatei sonst
+    ohne Not umformatieren (Reihenfolge der Attribute, Erweiterungen
+    fremder Geräte).
+    """
+    notes = load_track_notes(track_ids)
+    if notes.empty:
+        return gpx_bytes
+    gpx = gpxpy.parse(bytes(gpx_bytes).decode("utf-8", errors="replace"))
+    gpx.waypoints.extend(build_note_waypoints(notes))
+    return gpx.to_xml().encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1375,7 @@ def _invalidate_track_caches() -> None:
     load_metadata.clear()
     load_track_files.clear()
     load_heatmap_points.clear()
+    load_track_notes.clear()
 
 
 def insert_track(data: dict) -> None:
@@ -1294,8 +1498,15 @@ def update_track(track_id: str, track_title: str, sport_id: str | None, tour_id:
 
 
 def delete_track(track_id: str) -> None:
-    """Löscht einen Track (inkl. der gespeicherten GPX-Datei) unwiderruflich."""
+    """
+    Löscht einen Track (inkl. der gespeicherten GPX-Datei) unwiderruflich.
+
+    Die Info-Punkte des Tracks werden mitgelöscht: Sie beziehen sich über
+    'point_index' auf genau diesen Track und wären ohne ihn sinnlos
+    (anders als bei Sport/Tour, wo die Zuordnung nur entfällt).
+    """
     con = get_connection()
+    con.execute("DELETE FROM track_notes WHERE track_id = ?", [track_id])
     con.execute("DELETE FROM gpx WHERE track_id = ?", [track_id])
     _invalidate_track_caches()
 

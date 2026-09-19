@@ -90,11 +90,16 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-from functions import load_track_files, process_track
+from functions import load_track_files, load_track_notes, process_track
 from map import (
+    _keyed_container,
+    _render_fill_css,
+    _render_height_settings,
     _render_kpis,
+    _render_notes_panel,
     _render_planning_kpis,
     _resolve_map_profile_height,
+    _height_mode,
     render_planning_toggle,
     render_track_filters,
 )
@@ -197,6 +202,8 @@ def _build_payload(
     map_height: int,
     profile_height: int,
     split_points: dict | None = None,
+    notes: pd.DataFrame | None = None,
+    fill: bool = False,
 ) -> dict:
     """
     Baut die komplette Datenstruktur für die Browser-Komponente auf.
@@ -211,6 +218,16 @@ def _build_payload(
     gespeicherten Kennzahlen, nicht aus den ausgedünnten Punkten - so bleibt
     die Einfärbung unabhängig von der Ausdünnung), die Bounding-Box aller
     Tracks sowie die Anzeige-Einstellungen.
+
+    'notes' sind die Info-Punkte der Tracks (siehe
+    functions.load_track_notes). Sie werden je Track mit ihrer eigenen
+    Position (sie müssen nicht auf dem Track liegen) und der Kilometer-
+    Stelle ihres nächstgelegenen Trackpunkts übertragen; die Komponente
+    zeichnet sie als blaue Marker auf Karte und Höhenprofil.
+
+    'fill' meldet den Höhen-Modus "Fenster füllen" an die Komponente: Sie
+    lässt die Karte dann über die Flexbox mitwachsen, statt ihr eine feste
+    Pixelhöhe zu geben.
 
     'split_points' sind die im Planungsmodus gesetzten Unterteilungspunkte
     (track_id -> Liste von Punkt-Indizes, siehe map.st.session_state
@@ -255,16 +272,42 @@ def _build_payload(
         # DataFrame, übertragen wird aber nur jeder n-te Punkt (stride).
         # Gesucht ist deshalb der nächstgelegene tatsächlich übertragene
         # Punkt - bei stride = 1 ist das exakt derselbe Punkt.
+        # Hinweis: eigene Zählvariable 'sub' statt 'pos' - 'pos' ist die
+        # Nummer des Tracks (Schleifenkopf) und bestimmt weiter unten
+        # dessen Farbe; ein Überschreiben hier hätte die Trackfarben von
+        # den gesetzten Trennpunkten abhängig gemacht.
         splits = []
         for n, raw_idx in enumerate(sorted((split_points or {}).get(track_id, [])), start=1):
             if not 0 <= raw_idx < len(gdf):
                 continue
-            pos = int(np.searchsorted(idx, raw_idx))
-            if pos >= len(idx):
-                pos = len(idx) - 1
-            elif pos > 0 and abs(idx[pos - 1] - raw_idx) <= abs(idx[pos] - raw_idx):
-                pos -= 1
-            splits.append({"i": pos, "n": n})
+            sub_pos = int(np.searchsorted(idx, raw_idx))
+            if sub_pos >= len(idx):
+                sub_pos = len(idx) - 1
+            elif sub_pos > 0 and abs(idx[sub_pos - 1] - raw_idx) <= abs(idx[sub_pos] - raw_idx):
+                sub_pos -= 1
+            splits.append({"i": sub_pos, "n": n})
+
+        # Info-Punkte dieses Tracks: eigene Koordinaten (sie dürfen neben
+        # dem Track liegen), Höhe und Kilometer-Stelle vom nächstgelegenen
+        # Trackpunkt - Letztere bestimmt die Position im Höhenprofil.
+        track_notes = []
+        if notes is not None and not notes.empty:
+            own = notes[notes["track_id"] == track_id]
+            for _, note in own.iterrows():
+                raw_idx = 0 if pd.isna(note["point_index"]) else int(note["point_index"])
+                raw_idx = max(0, min(raw_idx, len(gdf) - 1))
+                track_notes.append({
+                    "lat": round(float(note["lat"]), 6),
+                    "lon": round(float(note["lon"]), 6),
+                    "km": round(float(cum_m[raw_idx]) / 1000.0, 4),
+                    "ele": (
+                        round(float(note["ele"]), 1)
+                        if pd.notna(note["ele"])
+                        else round(float(gdf["ele"].iloc[raw_idx]), 1)
+                    ),
+                    "title": str(note["note_title"] or "Punkt"),
+                    "text": "" if pd.isna(note["note_text"]) else str(note["note_text"]),
+                })
 
         time_passed = sub["time_passed"]
         seconds = (
@@ -285,6 +328,7 @@ def _build_payload(
             "km": _clean(cum_m[idx] / 1000.0, 4),
             "sec": _clean(seconds, 0),
             "splits": splits,
+            "notes": track_notes,
         })
 
     # Wertebereich der Farbskala aus den gespeicherten Kennzahlen (identisch
@@ -326,7 +370,11 @@ def _build_payload(
             "ramp": _RAMP,
         },
         "basemap": basemap,
-        "layout": {"mapHeight": int(map_height), "profileHeight": int(profile_height)},
+        "layout": {
+            "mapHeight": int(map_height),
+            "profileHeight": int(profile_height),
+            "fill": bool(fill),
+        },
         "stride": stride,
     }
 
@@ -365,7 +413,16 @@ _UPLOT_CSS = (
 _HTML_TEMPLATE = """<style>
   __UPLOT_CSS__
   html, body { margin: 0; padding: 0; font-family: "Source Sans Pro", system-ui, sans-serif; }
-  #wrap { position: relative; }
+  /* Flex-Spalte über die volle iframe-Höhe: Im Höhen-Modus "fill" streckt
+     das CSS der Seite (map._FILL_CSS) den iframe auf den verbleibenden
+     Platz bis zum Fensterrand - die Karte wächst dann über "flex: 1"
+     einfach mit, ohne dass Python eine Pixelhöhe kennen müsste. In den
+     anderen Modi setzt boot() feste Pixelhöhen, die Flexbox ändert daran
+     nichts. */
+  html, body, #wrap { height: 100%; }
+  #wrap { position: relative; display: flex; flex-direction: column; }
+  #map { flex: 1 1 auto; min-height: 0; }
+  #profile { flex: 0 0 auto; }
   #err {
     background: #fdecea; color: #7f231c; border-bottom: 1px solid #f5c6c2;
     padding: 6px 10px; font-size: 12px; white-space: pre-wrap;
@@ -476,7 +533,10 @@ function loadCss(urls) {
 function boot() {
 const T = D.tracks;
 const MAPH = D.layout.mapHeight, PROFH = D.layout.profileHeight;
-document.getElementById("map").style.height = MAPH + "px";
+/* Im Füllmodus bekommt die Karte ihre Höhe über die Flexbox (siehe CSS
+   oben) - eine Pixelhöhe würde sie wieder festnageln. Das Profil behält
+   in beiden Fällen seine eingestellte Höhe. */
+if (!D.layout.fill) document.getElementById("map").style.height = MAPH + "px";
 document.getElementById("profile").style.height = PROFH + "px";
 
 if (!T.length) { showError("Keine Trackpunkte übertragen."); return; }
@@ -598,6 +658,15 @@ T.forEach(t => {
     L.circleMarker([t.lat[s.i], t.lon[s.i]], { radius: 8, weight: 2, color: "#fff",
       fillColor: "#ff8c00", fillOpacity: 1, renderer: renderer })
       .bindTooltip("Trennpunkt " + s.n + ": " + (t.km[s.i] || 0).toFixed(2) + " km").addTo(map);
+  });
+  /* Info-Punkte (blau): eigene Koordinaten, können neben dem Track liegen.
+     Angelegt und bearbeitet werden sie auf der Seite "Karte"; hier werden
+     sie - wie die Trennpunkte - nur angezeigt. */
+  (t.notes || []).forEach(nt => {
+    L.circleMarker([nt.lat, nt.lon], { radius: 8, weight: 2, color: "#fff",
+      fillColor: "#1E88E5", fillOpacity: 1, renderer: renderer })
+      .bindTooltip("📍 " + esc(nt.title) + (nt.text ? "<br>" + esc(nt.text) : ""))
+      .addTo(map);
   });
 });
 
@@ -721,6 +790,10 @@ T.forEach(t => {
   PMARKS.push({ x: t.km[n - 1], y: t.ele[n - 1], c: "#d00000", lab: "Z" });
   (t.splits || []).forEach(s =>
     PMARKS.push({ x: t.km[s.i], y: t.ele[s.i], c: "#ff8c00", lab: String(s.n) }));
+  /* Info-Punkte an der Kilometer-Stelle ihres nächstgelegenen Trackpunkts
+     (blau, Beschriftung "i") - dieselben Punkte wie auf der Karte. */
+  (t.notes || []).forEach(nt =>
+    PMARKS.push({ x: nt.km, y: nt.ele, c: "#1E88E5", lab: "i" }));
 });
 function drawMarks(uu) {
   if (!PMARKS.length) return;
@@ -926,27 +999,13 @@ def render_linked_map_page(settings_container=None) -> None:
             key="kpi_col_width_pct",
             help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
         )
-        st.radio(
-            "Höhe Karte + Profil",
-            options=["window", "manual"],
-            index=0,
-            key="map_profile_height_mode",
-            format_func=lambda x: "An Fensterhöhe anpassen" if x == "window" else "Manuell",
-            help=(
-                "'An Fensterhöhe anpassen' liest die Browser-Fensterhöhe per "
-                "JavaScript aus und passt Karte + Profil entsprechend an."
-            ),
-        )
-        if st.session_state.map_profile_height_mode == "manual":
-            st.slider(
-                "Höhe Karte + Profil (px)",
-                min_value=450,
-                max_value=2200,
-                step=100,
-                value=1100,
-                key="map_profile_total_height_px",
-                help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
-            )
+        # Dieselbe Höhen-Einstellung wie auf der Seite "Karte" (gemeinsame
+        # Widget-Keys, siehe map._render_height_settings).
+        _render_height_settings()
+
+    # CSS des Füllmodus - vor dem Hauptbereich, damit die Komponente gleich
+    # beim ersten Rendern die richtige Höhe bekommt.
+    _render_fill_css()
 
     # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
     # Punkt-Indizes) - dieselbe Ablage wie auf der Seite "Karte"; hier nur
@@ -973,23 +1032,46 @@ def render_linked_map_page(settings_container=None) -> None:
     kpi_width_pct = st.session_state.kpi_col_width_pct
     col_kpis, col_map = st.columns([kpi_width_pct, 100 - kpi_width_pct], gap="small")
 
+    # Info-Punkte der ausgewählten Tracks (gecacht): für die Verwaltung
+    # links und die Anzeige in der Komponente rechts.
+    notes = load_track_notes(tuple(sorted(df["track_id"].tolist())))
+    single_track_id = df["track_id"].iloc[0] if len(df) == 1 else None
+    single_gdf = (
+        process_track(single_track_id, df["file_data"].iloc[0])
+        if single_track_id is not None
+        else None
+    )
+
     with col_kpis:
-        with st.container(border=True):
+        with _keyed_container("mp_kpis", border=True):
             if planning_active:
                 # Kennzahlen je Teil, Punkteliste und ZIP-Export - identisch
                 # zur Seite "Karte" (process_track ist gecacht, der Aufruf
                 # innerhalb von _build_payload kostet also nicht doppelt).
-                track_id = df["track_id"].iloc[0]
                 _render_planning_kpis(
-                    process_track(track_id, df["file_data"].iloc[0]),
-                    track_id,
+                    single_gdf,
+                    single_track_id,
                     df["track_title"].iloc[0],
+                    notes=notes,
                 )
             else:
                 _render_kpis(df)
 
+            # Info-Punkte: dieselbe Verwaltung wie auf der Seite "Karte".
+            # Die Position per Kartenklick zu wählen geht dort allerdings
+            # nicht - die Komponente meldet nichts an Streamlit zurück;
+            # hier bleiben die Koordinatenfelder.
+            _render_notes_panel(
+                notes,
+                gdf=single_gdf,
+                track_id=single_track_id,
+                track_title=df["track_title"].iloc[0] if single_track_id is not None else None,
+                planning_mode=planning_active,
+                allow_map_click=False,
+            )
+
     with col_map:
-        with st.container(border=True):
+        with _keyed_container("mp_box", border=True):
             if planning_active:
                 st.caption(
                     "📐 Planungsmodus: Die Trennpunkte werden in Karte und "
@@ -1004,14 +1086,19 @@ def render_linked_map_page(settings_container=None) -> None:
                 map_height,
                 profile_height,
                 split_points=st.session_state.split_points if planning_active else None,
+                notes=notes,
+                fill=_height_mode() == "fill",
             )
             # +48 px für die Werte-Leiste über der Karte (und ggf. den
             # Fehlerbalken); ohne Aufschlag schneidet der iframe das Profil
-            # unten ab.
-            _render_component(
-                _component_html(payload),
-                height=map_height + profile_height + 48,
-            )
+            # unten ab. Im Füllmodus ist das nur der Startwert - der
+            # iframe wird anschließend per CSS auf die Fensterhöhe
+            # gestreckt (Container-Key 'mp_map', siehe map._FILL_CSS).
+            with _keyed_container("mp_map"):
+                _render_component(
+                    _component_html(payload),
+                    height=map_height + profile_height + 48,
+                )
             if payload["stride"] > 1:
                 st.caption(
                     f"Hinweis: Für die Darstellung wurde jeder {payload['stride']}. "

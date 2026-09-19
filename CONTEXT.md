@@ -48,10 +48,21 @@ steht deshalb in `app.py`, nicht in den Seitenmodulen.
 
 ## Datenmodell
 
-Drei Tabellen (Anlage in `functions.init_database()`):
+Vier Tabellen (Anlage in `functions.init_database()`):
 
 - `sport` – `sport_id UUID`, `sport_title`
 - `tours` – `tour_id UUID`, `tour_title`
+- `track_notes` – Info-Punkte je Track (DDL als Konstante
+  `_TRACK_NOTES_DDL`, damit sie in `init_database()` UND in
+  `_ensure_schema_migrations()` identisch ist): `note_id`, `track_id`,
+  `note_title`, `note_text`, `note_kind` (`info`/`planning`), `lat`,
+  `lon`, `ele`, `point_index`, `time_stamp`.
+  `point_index` ist der Index des **nächstgelegenen** Trackpunkts im
+  aufbereiteten DataFrame (`process_track`) – nur daraus ergibt sich die
+  Stelle im Höhenprofil; die eigentliche Position (`lat`/`lon`) darf
+  daneben liegen. Abgrenzung zu den Trennpunkten des Planungsmodus:
+  Trennpunkte zerschneiden den Track und leben nur in `st.session_state`,
+  Info-Punkte tragen Informationen und liegen dauerhaft in der Datenbank.
 - `gpx` – ein Datensatz je Track:
   - Identität/Zuordnung: `track_id`, `track_title`, `sport_id`, `tour_id`
     (beide optional, beim Löschen von Sport/Tour auf `NULL` gesetzt)
@@ -69,6 +80,11 @@ Die GPX-Datei bleibt vollständig gespeichert. Dadurch sind Höhenprofil,
 Bestzeiten, Planung, Heatmap und das Neuberechnen von Kennzahlen jederzeit
 ohne erneuten Upload möglich.
 
+Beim Löschen eines Tracks werden seine Info-Punkte mitgelöscht
+(`delete_track()`), beim Export als Wegpunkte angehängt
+(`build_note_waypoints()` / `_with_note_waypoints()`, genutzt von
+`get_track_file()`, `export_tour_gpx()` und dem Planungs-ZIP in `map.py`).
+
 **Schema-Änderungen:** Neue Spalten zusätzlich in
 `_ensure_schema_migrations()` ergänzen (läuft bei jedem
 Verbindungsaufbau). Bestandsdatenbanken dürfen nicht auf
@@ -82,6 +98,7 @@ Verbindungsaufbau). Bestandsdatenbanken dürfen nicht auf
 | `process_track()` | `cache_data` | Aufbereitete Trackpunkte je `track_id` |
 | `load_metadata()` | `cache_data` | Kennzahlen aller Tracks für Karte/Statistik |
 | `load_track_files()` | `cache_data` | GPX-Blobs der ausgewählten Tracks |
+| `load_track_notes()` | `cache_data` | Info-Punkte der ausgewählten Tracks |
 | `load_heatmap_points()` | `cache_data` | Ausgedünnte Punkte für die Heatmap |
 | `reverse_geocode()`, `get_timezone()` | `cache_data` | Ergebnisse externer Abfragen |
 
@@ -99,9 +116,13 @@ Konvention: sprechende Schlüssel als Widget-`key`; interne Hilfswerte mit
 führendem Unterstrich.
 
 - Filter/Auswahl Karte: `sport_select`, `country_select`, `year_select`,
-  `season_select`, Checkboxen `track_<id>` / `tour_<jahr>_<monat>_<id>`
-- Anzeige: `plot_column`, `kpi_col_width_pct`, `map_profile_height_mode`,
-  `map_profile_total_height_px`, `window_height_js`
+  `season_select`, Checkboxen `track_select_<id>` /
+  `tour_select_<jahr>_<id>` sowie `_tour_open_<jahr>_<id>` (auf-/zugeklappt)
+- Anzeige: `plot_column`, `kpi_col_width_pct`, `map_profile_height_mode`
+  (`fill`/`window`/`manual`), `map_profile_height_px` (Profilhöhe im
+  Füllmodus), `map_profile_total_height_px`, `window_height_js`
+- Info-Punkte: `note_click_mode` (Kartenklick wählt Position),
+  `_note_position` (vorgemerkte Koordinaten), `_last_note_map_click`
 - Karte/Profil: `selected_point`, `my_chart_key`
 - Karte (Sync): `lm_plot_column`, `lm_basemap` (Anzeigeeinstellungen
   `kpi_col_width_pct`, `map_profile_height_mode`,
@@ -142,6 +163,10 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Neue Seite | Modul mit `render_*_page()` + Eintrag in `pages` in `app.py` |
 | Verhalten beim Beenden | `shutdown_app()`/`close_connection()` in `functions.py`, UI-Teil am Ende von `app.py` |
 | Filter der Kartenseiten | `render_track_filters()` in `map.py` (wirkt auf beide Karten) |
+| Darstellung der Track-Auswahl | `_render_track_tree()` / `_render_tour_group()` in `map.py` |
+| Info-Punkte (Logik/Export) | `functions.py`, Abschnitt "Info-Punkte" |
+| Info-Punkte (Bedienung) | `_render_notes_panel()` in `map.py` (von beiden Karten genutzt) |
+| Höhe von Karte + Profil | `_render_height_settings()`, `_resolve_map_profile_height()` und `_FILL_CSS` in `map.py` |
 | Planungs-Schalter | `render_planning_toggle()` in `map.py` (wirkt auf beide Karten) |
 | Interaktion Karte/Profil ohne Rerun | JS-Vorlage `_HTML_TEMPLATE` in `map_linked.py` |
 | Änderung am GPX-Parsing | `process_gpx_dataframe()` (pro Punkt) |
@@ -195,6 +220,31 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
 - Keine neuen Python-Abhängigkeiten; die beiden JS-Bibliotheken kommen
   versionsgepinnt vom CDN (`_CDN_*`).
 
+## Höhe von Karte und Profil
+
+Drei Modi (`map_profile_height_mode`), gemeinsam gerendert von
+`map._render_height_settings()`:
+
+- **`fill` (Standard)** – reines CSS (`map._FILL_CSS`), eingehängt über
+  Container mit festem Key: `mp_box` (Rahmen, `height: calc(100vh - 2rem)`,
+  Inhalt als Flex-Spalte), `mp_map` (`flex: 1`, gibt die Höhe bis zum
+  iframe durch), `mp_profile` (behält seine Pixelhöhe) und `mp_kpis`
+  (scrollt in sich selbst). Leaflet und uPlot reagieren von sich aus auf
+  die Größenänderung ihres iframes, deshalb genügt das CSS – **ohne**
+  Server-Rerun, wirksam schon beim ersten Rendern. Auf der Seite
+  "Karte (Sync)" liegt zusätzlich in der HTML-Vorlage ein Flex-Layout;
+  `layout.fill` im Payload sagt der Komponente, dass sie der Karte KEINE
+  Pixelhöhe setzen soll.
+- **`window`** – der alte Weg über `st_javascript` (misst
+  `window.parent.innerHeight`). Braucht je Messung einen Rerun und hinkt
+  nach Größenänderungen hinterher; bleibt nur als Ausweichweg.
+- **`manual`** – fester Pixelwert.
+
+Die Container-Keys sind Teil der Schnittstelle zum CSS: Wer sie umbenennt,
+muss `_FILL_CSS` mitziehen. `_keyed_container()` fällt auf ein
+schlüsselloses `st.container()` zurück, falls die Streamlit-Version `key`
+noch nicht kennt – dann ist lediglich der Füllmodus wirkungslos.
+
 ## Fallstricke
 
 - `timedelta.dt.total_seconds()` verwenden, nie `.dt.seconds` (schneidet
@@ -247,6 +297,28 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
   wird zeitversetzt in einem Hintergrund-Thread beendet, damit die Antwort
   den Browser noch erreicht; `get_connection()` darf sonst nirgends
   geschlossen werden.
+
+- Streamlit erlaubt **keinen `st.expander` im `st.expander`**. Die Touren
+  im Track-Baum stecken bereits im Jahres-Expander und werden deshalb über
+  einen eigenen `▸`/`▾`-Knopf mit Merker in `st.session_state`
+  auf-/zugeklappt (`_render_tour_group()`).
+- Die Klick-Auswertung im Höhenprofil rechnet über `curve_number // 2`
+  von der Trace-Nummer auf den Track zurück. Je Track gibt es GENAU zwei
+  Traces (Profil, Start/Ende) – zusätzliche Traces (z.B. die der
+  Info-Punkte) müssen deshalb **nach** der Track-Schleife angehängt
+  werden, sonst zeigt jeder Profilklick auf den falschen Track.
+- `st_folium` liefert `last_clicked` bei jedem Rerun erneut zurück, bis
+  ein neuer Klick erfolgt. Jede Auswertung braucht daher ihren eigenen
+  "zuletzt verarbeiteter Klick"-Merker (`_last_planning_map_click`,
+  `_last_note_map_click`), sonst entsteht eine Rerun-Schleife.
+- Ein Kartenklick kann zwei Bedeutungen haben (Trennpunkt setzen vs.
+  Position für einen Info-Punkt). Die Rangfolge steht an einer Stelle in
+  `_render_map_and_profile()`: `note_click_mode` gewinnt – ein Info-Punkt
+  darf gerade NICHT auf den nächsten Trackpunkt eingefangen werden.
+- Eingabefelder, deren Vorbelegung sich zwischen Reruns ändert (die
+  Koordinaten im Formular "Punkt hinzufügen"), bekommen **keinen** `key`:
+  Mit `key` würde Streamlit den alten Wert aus dem Sitzungszustand
+  wiederherstellen und die neue Vorbelegung ignorieren.
 
 ## Arbeitsweise
 

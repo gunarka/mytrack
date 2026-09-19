@@ -45,6 +45,17 @@ Aufbau der Seite:
    darunter erzeugt eine ZIP-Datei mit je einer GPX-Datei pro Teil
    sowie einer weiteren GPX-Datei mit den gesetzten Punkten als Wegpunkte
    (siehe _build_planning_export_zip).
+5. Info-Punkte ("Punkte zur Tour"): dauerhaft gespeicherte Anmerkungen zu
+   einem Track (Hütte, Aussicht, Abzweig, ...). Anders als die
+   Unterteilungspunkte aus Punkt 4 trennen sie den Track NICHT und müssen
+   auch nicht auf ihm liegen; sie werden in Karte (blauer Marker) und
+   Höhenprofil (blaue Raute) angezeigt und beim Export als Wegpunkte an
+   den zugehörigen Track angehängt. Angelegt/bearbeitet werden sie in der
+   Kennzahlen-Spalte (siehe _render_notes_panel), die Position wahlweise
+   per Kartenklick oder über die Koordinatenfelder.
+6. Höhe von Karte + Profil: drei Modi (Fenster füllen per CSS, Fensterhöhe
+   per JavaScript messen, fester Pixelwert) - siehe Abschnitt "Höhe von
+   Karte + Höhenprofil" weiter unten.
 
 Der Datenbankzugriff (load_metadata / load_track_files) liegt - wie aller
 übrige Datenzugriff auch - in functions.py; dieses Modul enthält nur
@@ -60,6 +71,7 @@ gecacht - siehe process_track() in functions.py.
 import hashlib  # Stabile Track-Signatur für den st_folium-Key (kein Python-hash(), da PYTHONHASHSEED)
 import io  # ZIP-Export im Planungsmodus (in-memory statt temporärer Dateien)
 import zipfile  # ZIP-Export im Planungsmodus
+from html import escape  # Maskiert Nutzertexte in Karten-Popups/Hovertexten
 
 import folium  # Erzeugt die interaktive Leaflet-Karte
 from folium.plugins import Fullscreen  # Vollbild-Schaltfläche der Karte
@@ -76,26 +88,47 @@ from streamlit_javascript import st_javascript  # Liest window.parent.innerHeigh
 from functions import (
     DEFAULT_MIN_ELEVATION_CHANGE_M,
     DEFAULT_MIN_SPEED_MOVING_KMH,
+    build_note_waypoints,
     compute_ascent_descent,
     compute_best_efforts,
     compute_moving_time_s,
+    delete_track_note,
+    insert_track_note,
     load_metadata,
     load_track_files,
+    load_track_notes,
     process_track,
+    update_track_note,
 )
 
 
 # --------------------------------------------------------------------------
 # Höhe von Karte + Höhenprofil
 # --------------------------------------------------------------------------
-# Bisheriger Fixwert war Karte=800px + Profil=300px (insgesamt 1100px) - das
-# bleibt der Standard-/Fallback-Wert, u.a. solange die tatsächliche
-# Fensterhöhe (im Modus "Fensterhöhe") noch nicht vom Browser ermittelt
-# wurde (siehe _resolve_map_profile_height).
+# Drei Modi, einstellbar in der Seitenleiste (siehe _render_height_settings):
+#
+#   "fill"   (Standard) - Karte und Profil füllen gemeinsam die Fensterhöhe.
+#            Umgesetzt rein über CSS (siehe _FILL_CSS): Der umgebende
+#            Container bekommt 'height: calc(100vh - ...)', das Profil
+#            behält seine Pixelhöhe, die Karte nimmt per Flexbox den Rest.
+#            Das ist der zuverlässige Weg, weil er OHNE Umweg über den
+#            Server funktioniert: sofort beim ersten Rendern, und beim
+#            Ändern der Fenstergröße zieht die Karte live mit (Leaflet und
+#            uPlot reagieren von sich aus auf die Größenänderung ihres
+#            iframes). Die an Python übergebenen Pixelhöhen sind in diesem
+#            Modus nur noch Startwerte für den iframe.
+#   "window" - alter Weg: die Fensterhöhe wird per JavaScript ausgelesen und
+#            als Pixelwert zurück an Python gegeben. Braucht immer einen
+#            zusätzlichen Rerun und aktualisiert sich nach einer
+#            Fenster-Größenänderung erst bei der nächsten Interaktion;
+#            bleibt als Ausweichweg erhalten.
+#   "manual" - feste Gesamthöhe per Schieberegler.
 _DEFAULT_TOTAL_HEIGHT_PX = 1100
 _MAX_TOTAL_HEIGHT_PX = 2200
 _MIN_MAP_HEIGHT_PX = 300
 _MIN_PROFILE_HEIGHT_PX = 150
+# Höhe des Höhenprofils im Modus "fill" (die Karte bekommt den Rest).
+_DEFAULT_PROFILE_HEIGHT_PX = 300
 # Anteil des Höhenprofils an der Gesamthöhe, entspricht ungefähr dem
 # bisherigen festen Verhältnis 300/1100.
 _PROFILE_HEIGHT_RATIO = 300 / 1100
@@ -116,14 +149,115 @@ def _split_map_profile_height(total_height_px: int) -> tuple[int, int]:
     return map_height_px, profile_height_px
 
 
+def _height_mode() -> str:
+    """Aktuell gewählter Höhen-Modus ("fill" | "window" | "manual")."""
+    return st.session_state.get("map_profile_height_mode", "fill")
+
+
+def _keyed_container(key: str, border: bool = False):
+    """
+    st.container() mit CSS-Klasse 'st-key-<key>' - darüber greifen die
+    Regeln aus _FILL_CSS gezielt auf genau diesen Container zu.
+
+    Der Rückfall ohne 'key' hält die Seite auf älteren Streamlit-Versionen
+    lauffähig (dann bleibt lediglich der Füllmodus wirkungslos).
+    """
+    try:
+        return st.container(border=border, key=key)
+    except TypeError:
+        return st.container(border=border)
+
+
+# CSS des Modus "fill" (siehe oben). Bewusst eng auf die drei Container-Keys
+# begrenzt, damit keine andere Stelle der App davon erfasst wird:
+#   mp_box     - umgebender Rahmen: exakt fensterhoch, Inhalt als Flex-Spalte
+#   mp_map     - Karte: nimmt den verbleibenden Platz (flex: 1) und gibt ihn
+#                bis zum iframe durch (Streamlit schachtelt mehrere <div>)
+#   mp_profile - Höhenprofil: behält seine Pixelhöhe
+#   mp_kpis    - Kennzahlen-Spalte: scrollt bei Bedarf in sich selbst,
+#                statt die Seite länger als das Fenster zu machen
+_FILL_CSS = """
+<style>
+.st-key-mp_box { height: calc(100vh - 2rem); }
+.st-key-mp_box > div { height: 100%; }
+.st-key-mp_map { flex: 1 1 auto; min-height: 240px; }
+.st-key-mp_map > div,
+.st-key-mp_map [data-testid="stElementContainer"],
+.st-key-mp_map [data-testid="stElementContainer"] > div,
+.st-key-mp_map iframe { height: 100% !important; }
+.st-key-mp_profile { flex: 0 0 auto; }
+.st-key-mp_kpis { max-height: calc(100vh - 2rem); overflow-y: auto; }
+</style>
+"""
+
+
+def _render_fill_css() -> None:
+    """Gibt das CSS des Füllmodus aus - nur, wenn dieser aktiv ist."""
+    if _height_mode() == "fill":
+        st.markdown(_FILL_CSS, unsafe_allow_html=True)
+
+
+def _render_height_settings() -> None:
+    """
+    Zeichnet die Höhen-Einstellung (Modus + passender Schieberegler) in die
+    Seitenleiste. Von BEIDEN Kartenseiten genutzt, damit dort dieselben
+    Optionen mit denselben Widget-Keys stehen und die Einstellung den
+    Seitenwechsel übersteht.
+    """
+    labels = {
+        "fill": "Fenster füllen",
+        "window": "Fensterhöhe messen (JS)",
+        "manual": "Manuell (px)",
+    }
+    st.radio(
+        "Höhe Karte + Profil",
+        options=list(labels.keys()),
+        index=0,
+        key="map_profile_height_mode",
+        format_func=lambda x: labels[x],
+        help=(
+            "'Fenster füllen': Karte und Profil füllen die Fensterhöhe "
+            "vollständig aus und passen sich beim Ändern der Fenstergröße "
+            "sofort an (reines CSS, kein Neuladen). "
+            "'Fensterhöhe messen': ermittelt die Fensterhöhe per JavaScript "
+            "und rechnet daraus feste Pixelwerte - aktualisiert sich erst "
+            "beim nächsten Rerun. "
+            "'Manuell': feste Gesamthöhe."
+        ),
+    )
+    if _height_mode() == "fill":
+        st.slider(
+            "Höhe Höhenprofil (px)",
+            min_value=_MIN_PROFILE_HEIGHT_PX,
+            max_value=600,
+            step=10,
+            value=_DEFAULT_PROFILE_HEIGHT_PX,
+            key="map_profile_height_px",
+            help="Die Karte darüber bekommt den restlichen Platz bis zum Fensterrand.",
+        )
+    elif _height_mode() == "manual":
+        st.slider(
+            "Höhe Karte + Profil (px)",
+            min_value=_MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX,
+            max_value=_MAX_TOTAL_HEIGHT_PX,
+            step=100,
+            value=_DEFAULT_TOTAL_HEIGHT_PX,
+            key="map_profile_total_height_px",
+            help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
+        )
+
+
 def _resolve_map_profile_height() -> tuple[int, int]:
     """
-    Ermittelt die aktuell zu verwendende Höhe für Karte + Höhenprofil als
-    (map_height_px, profile_height_px) - entweder automatisch aus der
-    Fensterhöhe des Browsers oder über den manuell gesetzten Schieberegler
-    (siehe Auswahl 'map_profile_height_mode' in der Seitenleiste).
+    Ermittelt die zu verwendende Höhe für Karte + Höhenprofil als
+    (map_height_px, profile_height_px) - je nach Modus 'fill', 'window'
+    oder 'manual' (siehe _render_height_settings).
 
-    Im Automatik-Modus wird per st_javascript() der Wert von
+    Im Modus "fill" sind diese Werte nur Startwerte: Die tatsächliche Höhe
+    bestimmt anschließend das CSS (_FILL_CSS). Das Höhenprofil behält
+    dabei genau den hier gelieferten Pixelwert.
+
+    Im Modus "window" wird per st_javascript() der Wert von
     window.parent.innerHeight aus dem Browser geholt.
 
     Wichtig: 'window.innerHeight' würde die Höhe des eigenen
@@ -145,7 +279,18 @@ def _resolve_map_profile_height() -> tuple[int, int]:
     Für eine regelmässige Aktualisierung kann der Schieberegler 'Höhe Karte
     + Profil' auf 'Manuell' umgeschaltet werden.
     """
-    if st.session_state.get("map_profile_height_mode") == "manual":
+    mode = _height_mode()
+
+    if mode == "fill":
+        profile_height_px = int(
+            st.session_state.get("map_profile_height_px", _DEFAULT_PROFILE_HEIGHT_PX)
+        )
+        # Startwert für die Karte: der Rest der Standardhöhe. Die
+        # endgültige Höhe setzt gleich das CSS (siehe _FILL_CSS).
+        map_height_px = max(_MIN_MAP_HEIGHT_PX, _DEFAULT_TOTAL_HEIGHT_PX - profile_height_px)
+        return map_height_px, profile_height_px
+
+    if mode == "manual":
         total_height_px = st.session_state.get("map_profile_total_height_px", _DEFAULT_TOTAL_HEIGHT_PX)
         return _split_map_profile_height(total_height_px)
 
@@ -214,14 +359,29 @@ def _track_checkbox_key(track_id) -> str:
     return f"track_select_{track_id}"
 
 
-def _tour_checkbox_key(year: int, month: int, tour_id) -> str:
+def _tour_checkbox_key(year: int, tour_id) -> str:
     """
-    Widget-Key der "alles auswählen"-Checkbox einer Tour INNERHALB einer
-    bestimmten Jahr/Monat-Gruppe. Erstreckt sich eine Tour über mehrere
-    Monate, erscheint sie entsprechend mehrfach mit jeweils eigenem Key -
-    jede Checkbox wirkt dann nur auf die Tracks ihrer eigenen Gruppe.
+    Widget-Key der "alles auswählen"-Checkbox einer Tour innerhalb eines
+    Jahres.
+
+    Eine Tour erscheint im Baum genau EINMAL je Jahr (unter dem Monat
+    ihres frühesten Tracks, siehe _render_track_tree) - auch dann, wenn
+    ihre Etappen über einen Monatswechsel laufen. Der Monat ist deshalb
+    bewusst nicht Teil des Schlüssels: Sonst hinge der Key davon ab, in
+    welchem Monat die Tour gerade einsortiert wird, und die Auswahl ginge
+    beim Filtern verloren.
     """
-    return f"tour_select_{year}_{month}_{tour_id}"
+    return f"tour_select_{year}_{tour_id}"
+
+
+def _tour_open_key(year: int, tour_id) -> str:
+    """Sitzungs-Key, der merkt, ob eine Tour im Baum aufgeklappt ist."""
+    return f"_tour_open_{year}_{tour_id}"
+
+
+def _on_tour_expand(open_key: str) -> None:
+    """Callback des ▸/▾-Knopfes: klappt eine Tour auf bzw. wieder zu."""
+    st.session_state[open_key] = not st.session_state.get(open_key, False)
 
 
 def _on_tour_toggle(tour_key: str, track_ids: list) -> None:
@@ -272,11 +432,95 @@ def _persistent_checkbox(label: str, key: str, default: bool, on_change, args: t
     return st.checkbox(label, **kwargs)
 
 
+def _render_tour_group(year: int, tour_id, group: pd.DataFrame) -> None:
+    """
+    Zeichnet EINE Tour im Auswahlbaum: eine Zeile mit Aufklapp-Knopf und
+    "alles auswählen"-Checkbox, darunter - nur wenn aufgeklappt - die
+    einzelnen Tracks der Tour.
+
+    Mehrtagestouren machen den Baum sonst sehr lang; eingeklappt steht je
+    Tour nur eine Zeile, und der Normalfall "die ganze Tour ansehen" ist
+    ein einziger Klick. Der Aufklapp-Knopf erscheint nur bei mehr als
+    einem Track - bei einer Tour mit genau einem Track gäbe es darunter
+    nichts zu zeigen, was die Zeile nicht schon sagt.
+
+    Ein verschachtelter st.expander wäre hier nicht möglich: Der Baum
+    steckt bereits in einem Jahres-Expander, und Streamlit erlaubt keine
+    Expander im Expander. Deshalb der eigene Knopf mit Merker im
+    Sitzungszustand (siehe _tour_open_key).
+    """
+    tour_title = group["tour_title"].iloc[0]
+    track_ids = group["track_id"].tolist()
+    tour_key = _tour_checkbox_key(year, tour_id)
+    open_key = _tour_open_key(year, tour_id)
+    is_open = st.session_state.get(open_key, False)
+
+    # Zeitraum der Tour als kurze Zusatzinfo (z.B. "12.–14.07.").
+    days = group["time_start"].dropna()
+    if len(days):
+        first, last = days.min(), days.max()
+        span = (
+            f"{first:%d.%m.}"
+            if first.date() == last.date()
+            else f"{first:%d.%m.}–{last:%d.%m.}"
+        )
+    else:
+        span = ""
+
+    label = f"🧭 {tour_title} ({len(track_ids)}){f' · {span}' if span else ''}"
+    initial = all(
+        st.session_state.get(_track_checkbox_key(tid), False) for tid in track_ids
+    )
+
+    if len(track_ids) > 1:
+        col_btn, col_box = st.columns([1, 8], gap="small", vertical_alignment="center")
+        with col_btn:
+            st.button(
+                "▾" if is_open else "▸",
+                key=f"btn{open_key}",
+                on_click=_on_tour_expand,
+                args=(open_key,),
+                help="Tracks der Tour ein-/ausblenden",
+            )
+        box_container = col_box
+    else:
+        is_open = False
+        box_container = st.container()
+
+    with box_container:
+        _persistent_checkbox(
+            label,
+            key=tour_key,
+            default=initial,
+            on_change=_on_tour_toggle,
+            args=(tour_key, track_ids),
+        )
+
+    if not is_open:
+        return
+
+    for _, row in group.iterrows():
+        day = f"{row['time_start']:%d.%m.} " if pd.notna(row["time_start"]) else ""
+        _persistent_checkbox(
+            f"　↳ {day}{row['track_title']}",
+            key=_track_checkbox_key(row["track_id"]),
+            default=False,
+            on_change=_on_track_toggle,
+            args=(tour_key, track_ids),
+        )
+
+
 def _render_track_tree(meta: pd.DataFrame) -> list:
     """
     Baut die Track-Auswahl als verschachtelte Struktur auf:
-    Jahr (Expander) -> Monat -> Tour ("alles auswählen") -> einzelne Tracks.
-    Tracks ohne Tour erscheinen direkt unter ihrem Monat.
+    Jahr (Expander) -> Monat -> Tour (eingeklappt) bzw. einzelner Track.
+
+    Eine Tour erscheint je Jahr genau einmal, einsortiert unter dem Monat
+    ihres frühesten Tracks - auch wenn ihre Etappen über einen
+    Monatswechsel laufen. Sie ist zunächst eingeklappt und zeigt nur eine
+    Zeile mit Titel, Etappenzahl und Zeitraum (siehe _render_tour_group);
+    aufgeklappt darunter die einzelnen Tracks. Tracks ohne Tour stehen
+    direkt unter ihrem Monat.
 
     'meta' sollte bereits durch die Pills-Filter (Sport/Jahr/Jahreszeit)
     eingeschränkt sein - der Baum zeigt ausschließlich die übergebenen
@@ -289,46 +533,35 @@ def _render_track_tree(meta: pd.DataFrame) -> list:
     for year in years:
         year_df = meta[meta["year"] == year]
         with st.expander(f"{int(year)} ({len(year_df)})", expanded=(year == most_recent_year)):
+            # Monat, in dem jede Tour dieses Jahres einsortiert wird: der
+            # ihres frühesten Tracks. Ohne diese Zuordnung würde eine über
+            # den Monatswechsel laufende Tour in beiden Monaten auftauchen.
+            with_tour = year_df[year_df["tour_id"].notna()]
+            tour_month = (
+                with_tour.groupby("tour_id")["month"].min().to_dict() if len(with_tour) else {}
+            )
+
             months = sorted(year_df["month"].dropna().unique().tolist(), reverse=True)
             for month in months:
                 month_df = year_df[year_df["month"] == month]
+                without_tour = month_df[month_df["tour_id"].isna()]
+                tours_here = [tid for tid, m in tour_month.items() if m == month]
+                if not tours_here and without_tour.empty:
+                    continue
+
                 st.markdown(f"**{_MONTH_NAMES[int(month) - 1]}**")
 
-                with_tour = month_df[month_df["tour_id"].notna()]
-                without_tour = month_df[month_df["tour_id"].isna()]
-
-                # Tracks mit Tour: gruppiert mit "alles auswählen"-Checkbox.
-                for tour_id, group in with_tour.groupby("tour_id"):
-                    tour_title = group["tour_title"].iloc[0]
-                    track_ids = group["track_id"].tolist()
-                    tour_key = _tour_checkbox_key(int(year), int(month), tour_id)
-                    initial = all(
-                        st.session_state.get(_track_checkbox_key(tid), False)
-                        for tid in track_ids
-                    )
-                    _persistent_checkbox(
-                        f"🧭 {tour_title} ({len(track_ids)})",
-                        key=tour_key,
-                        default=initial,
-                        on_change=_on_tour_toggle,
-                        args=(tour_key, track_ids),
-                    )
-                    for _, row in group.iterrows():
-                        track_key = _track_checkbox_key(row["track_id"])
-                        _persistent_checkbox(
-                            f"　↳ {row['track_title']}",
-                            key=track_key,
-                            default=False,
-                            on_change=_on_track_toggle,
-                            args=(tour_key, track_ids),
-                        )
+                # Touren dieses Monats - mit ALLEN ihren Tracks des Jahres,
+                # nicht nur denen des Monats (s.o.).
+                for tour_id in tours_here:
+                    group = with_tour[with_tour["tour_id"] == tour_id].sort_values("time_start")
+                    _render_tour_group(int(year), tour_id, group)
 
                 # Tracks ohne Tour: einzeln, direkt unter dem Monat.
                 for _, row in without_tour.iterrows():
-                    track_key = _track_checkbox_key(row["track_id"])
                     _persistent_checkbox(
                         row["track_title"],
-                        key=track_key,
+                        key=_track_checkbox_key(row["track_id"]),
                         default=False,
                         on_change=_on_track_toggle,
                         args=(None, []),
@@ -549,6 +782,195 @@ def _render_best_efforts(gdf: pd.DataFrame) -> None:
 
 
 # --------------------------------------------------------------------------
+# Info-Punkte ("Punkte zur Tour")
+# --------------------------------------------------------------------------
+# Dauerhaft gespeicherte Anmerkungen zu einem Track (Hütte, Aussicht,
+# Wasserstelle, Gefahrenstelle ...), siehe functions._TRACK_NOTES_DDL.
+#
+# Bewusste Abgrenzung zu den Unterteilungspunkten des Planungsmodus:
+#   - Unterteilungspunkte TRENNEN den Track in Teile, liegen immer exakt
+#     auf einem Trackpunkt und leben nur im Sitzungszustand.
+#   - Info-Punkte TRENNEN NICHTS. Sie dürfen neben dem Track liegen (die
+#     Hütte steht selten genau auf der Spur) und bleiben gespeichert.
+# Angelegt werden sie in beiden Betriebsarten - normal wie im
+# Planungsmodus; angezeigt werden sie immer, auf Karte UND Höhenprofil.
+_NOTE_COLOR = "#1E88E5"
+
+
+def _note_position_on_track(gdf: pd.DataFrame, note: pd.Series) -> tuple[int, float, float]:
+    """
+    Liefert zu einem Info-Punkt (index, distance_m, elevation_m) bezogen
+    auf das verarbeitete Track-DataFrame.
+
+    Der gespeicherte 'point_index' zeigt auf den nächstgelegenen
+    Trackpunkt; daraus ergibt sich die Stelle auf der x-Achse des
+    Höhenprofils. Er wird defensiv in den gültigen Bereich geklemmt -
+    wurde ein Track nach dem Anlegen des Punkts neu hochgeladen und ist
+    dabei kürzer geworden, soll der Punkt trotzdem noch dargestellt
+    werden. Fehlt eine eigene Höhe, wird die des Trackpunkts verwendet,
+    damit der Punkt im Profil auf der Kurve liegt.
+    """
+    idx = 0 if pd.isna(note["point_index"]) else int(note["point_index"])
+    idx = max(0, min(idx, len(gdf) - 1))
+    elevation = float(note["ele"]) if pd.notna(note["ele"]) else float(gdf["ele"].iloc[idx])
+    return idx, float(gdf["distance"].iloc[idx]), elevation
+
+
+def _note_texts(note: pd.Series, distance_m: float) -> tuple[str, str]:
+    """
+    Baut (Popup-HTML für die Karte, Hovertext für das Höhenprofil) eines
+    Info-Punkts. Nutzertexte werden maskiert (escape), damit ein '<' im
+    Titel weder das Leaflet-Popup noch den Plotly-Hovertext zerlegt.
+    """
+    title = escape(str(note["note_title"] or "Punkt"))
+    text = escape(str(note["note_text"])) if pd.notna(note["note_text"]) else ""
+    km = f"{distance_m / 1000:.1f} km"
+    popup = f"<b>📍 {title}</b><br><i>{km}</i>"
+    hover = f"<b>📍 {title}</b><br>{km}"
+    if text:
+        body = text.replace("\n", "<br>")
+        popup += f"<br>{body}"
+        hover += f"<br>{body}"
+    return popup, hover
+
+
+def _note_default_position(gdf: pd.DataFrame, track_id) -> tuple[float, float]:
+    """
+    Vorbelegung der Koordinaten im Formular "Punkt hinzufügen", in dieser
+    Reihenfolge: zuletzt auf der Karte angeklickte Stelle (siehe
+    '_note_position'), sonst der zuletzt im Höhenprofil gewählte Punkt,
+    sonst der Startpunkt des Tracks.
+    """
+    pending = st.session_state.get("_note_position")
+    if pending:
+        return float(pending["lat"]), float(pending["lon"])
+    selected = st.session_state.get("selected_point")
+    if selected and selected["track_id"] == track_id:
+        return float(selected["lat"]), float(selected["lon"])
+    return float(gdf["lat"].iloc[0]), float(gdf["lon"].iloc[0])
+
+
+def _render_notes_panel(
+    notes: pd.DataFrame,
+    gdf: pd.DataFrame | None = None,
+    track_id=None,
+    track_title: str | None = None,
+    planning_mode: bool = False,
+    allow_map_click: bool = True,
+) -> None:
+    """
+    Zeichnet die Verwaltung der Info-Punkte in die Kennzahlen-Spalte:
+    Liste der vorhandenen Punkte (je Punkt ein Aufklapp-Feld zum
+    Bearbeiten/Löschen) und darunter das Formular für einen neuen Punkt.
+
+    Bearbeiten und Anlegen setzen genau EINEN ausgewählten Track voraus
+    ('gdf' ist dann dessen verarbeitetes DataFrame): Ein Punkt gehört zu
+    einem Track, und für die Stelle im Höhenprofil braucht es dessen
+    Punktfolge. Sind mehrere Tracks ausgewählt, werden die Punkte nur
+    aufgelistet - auf Karte und Profil erscheinen sie trotzdem alle.
+
+    'allow_map_click' blendet die Option "Position per Kartenklick" aus.
+    Die Seite "Karte (Sync)" setzt sie auf False: Ihre Komponente meldet
+    nichts an Streamlit zurück, ein Kartenklick käme dort also nie an.
+    """
+    st.divider()
+    st.caption("📍 Punkte zur Tour")
+
+    if notes.empty:
+        st.caption("– keine –")
+
+    for _, note in notes.iterrows():
+        editable = gdf is not None and note["track_id"] == track_id
+        if not editable:
+            st.caption(f"📍 {note['note_title'] or 'Punkt'}")
+            continue
+
+        idx, distance_m, _ = _note_position_on_track(gdf, note)
+        note_id = str(note["note_id"])
+        with st.expander(f"📍 {note['note_title'] or 'Punkt'} · {distance_m / 1000:.1f} km"):
+            new_title = st.text_input("Titel", value=note["note_title"] or "", key=f"nt_{note_id}")
+            new_text = st.text_area(
+                "Beschreibung",
+                value="" if pd.isna(note["note_text"]) else note["note_text"],
+                key=f"nx_{note_id}",
+                height=80,
+            )
+            col_lat, col_lon = st.columns(2)
+            new_lat = col_lat.number_input(
+                "Breite", value=float(note["lat"]), format="%.6f", step=0.0001, key=f"na_{note_id}"
+            )
+            new_lon = col_lon.number_input(
+                "Länge", value=float(note["lon"]), format="%.6f", step=0.0001, key=f"no_{note_id}"
+            )
+            col_save, col_del = st.columns(2)
+            if col_save.button("Speichern", key=f"ns_{note_id}", width="stretch"):
+                # Position geändert -> nächstgelegenen Trackpunkt (und damit
+                # die Stelle im Höhenprofil) neu bestimmen.
+                new_index = _nearest_point_index(gdf, new_lat, new_lon)
+                update_track_note(
+                    note_id,
+                    new_title.strip() or "Punkt",
+                    new_text.strip(),
+                    new_lat,
+                    new_lon,
+                    float(gdf["ele"].iloc[new_index]),
+                    new_index,
+                )
+                st.rerun()
+            if col_del.button("Löschen", key=f"nd_{note_id}", width="stretch"):
+                delete_track_note(note_id)
+                st.rerun()
+
+    if gdf is None:
+        st.caption(
+            "Zum Anlegen oder Ändern genau einen Track auswählen."
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # Neuer Punkt
+    # ------------------------------------------------------------------
+    if allow_map_click:
+        st.checkbox(
+            "Position per Kartenklick",
+            key="note_click_mode",
+            help=(
+                "Ist dies aktiv, übernimmt ein Klick auf die Karte die "
+                "Koordinaten in das Formular unten - der Punkt muss dabei NICHT "
+                "auf dem Track liegen. Im Planungsmodus hat diese Einstellung "
+                "Vorrang: Der Kartenklick setzt dann keinen Trennpunkt "
+                "mehr (das geht weiterhin über das Höhenprofil)."
+            ),
+        )
+    lat_default, lon_default = _note_default_position(gdf, track_id)
+    add_label = f"➕ Punkt hinzufügen{f' – {track_title}' if track_title else ''}"
+    with st.expander(add_label, expanded=bool(st.session_state.get("_note_position"))):
+        # Bewusst ohne 'key' an den Eingabefeldern: So übernimmt das
+        # Formular die per Kartenklick geänderte Vorbelegung (value=) beim
+        # nächsten Rerun automatisch.
+        with st.form("note_add_form", clear_on_submit=True):
+            title = st.text_input("Titel", placeholder="z.B. Hütte, Aussicht, Abzweig")
+            text = st.text_area("Beschreibung", height=80)
+            col_lat, col_lon = st.columns(2)
+            lat = col_lat.number_input("Breite", value=lat_default, format="%.6f", step=0.0001)
+            lon = col_lon.number_input("Länge", value=lon_default, format="%.6f", step=0.0001)
+            if st.form_submit_button("Hinzufügen", width="stretch"):
+                point_index = _nearest_point_index(gdf, lat, lon)
+                insert_track_note(
+                    track_id,
+                    title.strip() or "Punkt",
+                    text.strip(),
+                    lat,
+                    lon,
+                    float(gdf["ele"].iloc[point_index]),
+                    point_index,
+                    note_kind="planning" if planning_mode else "info",
+                )
+                st.session_state["_note_position"] = None
+                st.rerun()
+
+
+# --------------------------------------------------------------------------
 # Planungsmodus: Track in Teile unterteilen, Kennzahlen je Teil,
 # GPX-Export
 # --------------------------------------------------------------------------
@@ -692,13 +1114,26 @@ def _slugify_filename(text: str) -> str:
     return "_".join(cleaned.split()) or "track"
 
 
-def _gdf_slice_to_gpx_xml(gdf: pd.DataFrame, start_idx: int, end_idx: int, name: str) -> str:
+def _gdf_slice_to_gpx_xml(
+    gdf: pd.DataFrame,
+    start_idx: int,
+    end_idx: int,
+    name: str,
+    notes: pd.DataFrame | None = None,
+) -> str:
     """Baut aus den Punkten start_idx bis end_idx (inklusive) eines
     verarbeiteten Track-DataFrames eine eigenständige GPX-Datei (ein
-    <trk> mit genau einem <trkseg>) und gibt deren XML-Text zurück."""
+    <trk> mit genau einem <trkseg>) und gibt deren XML-Text zurück.
+
+    'notes' sind die Info-Punkte des Tracks; übernommen werden nur die,
+    deren nächstgelegener Trackpunkt in diesem Abschnitt liegt - so
+    wandert jeder Punkt in genau die Teildatei, zu der er gehört."""
     gpx = gpxpy.gpx.GPX()
     track = gpxpy.gpx.GPXTrack(name=name)
     gpx.tracks.append(track)
+    if notes is not None and not notes.empty:
+        in_segment = notes["point_index"].between(start_idx, end_idx)
+        gpx.waypoints.extend(build_note_waypoints(notes[in_segment]))
     segment = gpxpy.gpx.GPXTrackSegment()
     track.segments.append(segment)
     for _, row in gdf.iloc[start_idx : end_idx + 1].iterrows():
@@ -737,6 +1172,7 @@ def _build_planning_export_zip(
     track_title: str,
     bounds: list[tuple[int, int]],
     split_indices: list[int],
+    notes: pd.DataFrame | None = None,
 ) -> bytes:
     """
     Baut die ZIP-Datei für den Export-Button des Planungsmodus: je
@@ -744,22 +1180,37 @@ def _build_planning_export_zip(
     sofern mindestens ein Unterteilungspunkt gesetzt ist - eine weitere
     GPX-Datei mit allen Punkten als Wegpunkte (_split_points_to_gpx_xml).
     Gibt die fertige ZIP-Datei als Bytes zurück (für st.download_button).
+
+    'notes' sind die Info-Punkte des Tracks. Sie landen als Wegpunkte in
+    derjenigen Teildatei, in deren Abschnitt sie liegen (siehe
+    _gdf_slice_to_gpx_xml), und zusätzlich vollständig in einer eigenen
+    Datei - damit gehen sie beim Export nie verloren, egal ob das
+    Zielprogramm die Teile einzeln oder gesammelt einliest.
     """
     base_name = _slugify_filename(track_title)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for n, (start_idx, end_idx) in enumerate(bounds, start=1):
             xml = _gdf_slice_to_gpx_xml(
-                gdf, start_idx, end_idx, name=f"{track_title} – Teil {n}"
+                gdf, start_idx, end_idx, name=f"{track_title} – Teil {n}", notes=notes
             )
             zf.writestr(f"{base_name}_Teil_{n:02d}.gpx", xml)
         if split_indices:
             xml_points = _split_points_to_gpx_xml(gdf, split_indices)
-            zf.writestr(f"{base_name}_punkte.gpx", xml_points)
+            zf.writestr(f"{base_name}_trennpunkte.gpx", xml_points)
+        if notes is not None and not notes.empty:
+            gpx_notes = gpxpy.gpx.GPX()
+            gpx_notes.waypoints.extend(build_note_waypoints(notes))
+            zf.writestr(f"{base_name}_punkte.gpx", gpx_notes.to_xml())
     return buffer.getvalue()
 
 
-def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) -> None:
+def _render_planning_kpis(
+    gdf: pd.DataFrame,
+    track_id: str,
+    track_title: str,
+    notes: pd.DataFrame | None = None,
+) -> None:
     """
     Planungsmodus-Variante von _render_kpis(): zeigt statt der Kennzahlen
     je Track die Kennzahlen je Teil eines einzelnen Tracks (der
@@ -798,7 +1249,7 @@ def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) ->
     # Unterteilungspunkte: Liste mit Lösch-Button je Punkt
     # ------------------------------------------------------------------
     st.divider()
-    st.caption("Unterteilungspunkte")
+    st.caption("Trennpunkte")
     if not split_indices:
         st.caption("– keine –")
     else:
@@ -816,7 +1267,7 @@ def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) ->
     # Export: je Teil eine GPX-Datei + eine GPX-Datei mit den Punkten
     # ------------------------------------------------------------------
     st.divider()
-    zip_bytes = _build_planning_export_zip(gdf, track_title, bounds, split_indices)
+    zip_bytes = _build_planning_export_zip(gdf, track_title, bounds, split_indices, notes)
     st.download_button(
         "📦 Export",
         data=zip_bytes,
@@ -826,8 +1277,9 @@ def _render_planning_kpis(gdf: pd.DataFrame, track_id: str, track_title: str) ->
         width="stretch",
         help=(
             "Lädt eine ZIP-Datei herunter: je eine GPX-Datei pro Teil "
-            "sowie eine weitere GPX-Datei mit den Unterteilungspunkten als "
-            "Wegpunkte."
+            "(inkl. der Info-Punkte des jeweiligen Abschnitts), eine "
+            "GPX-Datei mit den Trennpunkten sowie eine mit allen "
+            "Info-Punkten als Wegpunkte."
         ),
     )
 
@@ -860,10 +1312,15 @@ def _render_map_and_profile(
 
     'map_height'/'profile_height' (in Pixeln) bestimmen die Höhe der
     Folium-Karte bzw. des Plotly-Höhenprofils - von render_map_page() über
-    _resolve_map_profile_height() ermittelt (entweder automatisch aus der
-    Fensterhöhe oder über den manuellen Schieberegler in der Seitenleiste,
-    siehe dort).
+    _resolve_map_profile_height() ermittelt (siehe dort). Im Höhen-Modus
+    "fill" sind es nur Startwerte, die endgültige Höhe macht das CSS.
+
+    Die Info-Punkte der ausgewählten Tracks werden hier selbst nachgeladen
+    (gecacht, siehe functions.load_track_notes) und als blaue Marker auf
+    der Karte sowie als Rauten im Höhenprofil eingezeichnet - unabhängig
+    davon, ob der Planungsmodus aktiv ist.
     """
+    notes = load_track_notes(tuple(sorted(df["track_id"].tolist())))
     # ----------------------------------------------------------------------
     # Wertebereiche für Kartenausschnitt und Farbskala
     # ----------------------------------------------------------------------
@@ -986,6 +1443,14 @@ def _render_map_and_profile(
     # zweites Mal für denselben Track aufzurufen.
     track_store = dict(track_store_seed) if track_store_seed else {}
 
+    # Sammelbehälter für die Info-Punkte ALLER Tracks: Sie werden in der
+    # Schleife befüllt, aber erst danach als EINE gemeinsame Trace ins
+    # Profil gehängt (siehe unten - die Reihenfolge der Traces ist für die
+    # Klick-Auflösung bedeutsam).
+    note_x: list[float] = []
+    note_y: list[float] = []
+    note_hover: list[str] = []
+
     for i in range(len(df)):
         gpx_file = df["file_data"].iloc[i]
         track_id = df["track_id"].iloc[i]
@@ -1008,6 +1473,24 @@ def _render_map_and_profile(
         # unten sowohl für die Hover-Marker auf der Karte als auch für das
         # Höhenprofil verwendet (siehe _build_hover_texts).
         hover_texts = _build_hover_texts(gdf, df["track_title"].iloc[i])
+
+        # Info-Punkte DIESES Tracks: Position im Profil (x = fortlaufende
+        # Distanz am nächstgelegenen Trackpunkt) einmal hier bestimmen -
+        # die Kartenmarker entstehen gleich darunter, die Profil-Trace
+        # erst NACH der Schleife (siehe dort).
+        track_notes = notes[notes["track_id"] == track_id] if not notes.empty else notes
+        for _, note in track_notes.iterrows():
+            note_idx, note_distance, note_ele = _note_position_on_track(gdf, note)
+            popup_html, hover_html = _note_texts(note, note_distance)
+            note_x.append(note_distance)
+            note_y.append(note_ele)
+            note_hover.append(hover_html)
+            folium.Marker(
+                [float(note["lat"]), float(note["lon"])],
+                tooltip=popup_html,
+                popup=folium.Popup(popup_html, max_width=280),
+                icon=folium.Icon(color="blue", icon="info-sign"),
+            ).add_to(m)
 
         # Unterteilungspunkte DIESES Tracks (Planungsmodus) - einmal hier
         # ermittelt, weiter unten sowohl für die Marker auf der Karte als
@@ -1194,6 +1677,33 @@ def _render_map_and_profile(
             )
         )
 
+    # Info-Punkte als gemeinsame Trace ins Höhenprofil - bewusst als
+    # ALLERLETZTE Trace, NACH der Track-Schleife:
+    # Die Klick-Auswertung weiter unten rechnet über "curve_number // 2"
+    # von der Trace-Nummer auf den Track zurück und setzt dafür voraus,
+    # dass die ersten 2*n Traces paarweise zu den n Tracks gehören. Eine
+    # Trace dazwischen würde diese Zuordnung verschieben; am Ende
+    # angehängt bekommt sie eine Nummer >= 2*n und wird dort korrekt
+    # ignoriert (siehe "track_pos < len(df)").
+    if note_x:
+        fig.add_trace(
+            go.Scatter(
+                x=note_x,
+                y=note_y,
+                mode="markers",
+                marker=dict(
+                    symbol="diamond",
+                    size=14,
+                    color=_NOTE_COLOR,
+                    line=dict(color="white", width=2),
+                ),
+                text=note_hover,
+                hoverlabel=dict(bgcolor=_NOTE_COLOR),
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False,
+            )
+        )
+
     # y-Bereich des Höhenprofils EINMAL über ALLE ausgewählten Tracks
     # setzen (zuvor wurde er in der Schleife je Track überschrieben, sodass
     # am Ende nur der letzte Track passend skaliert war und die übrigen
@@ -1215,6 +1725,18 @@ def _render_map_and_profile(
             stroke=True,
             color="black",
             weight=3,
+        ).add_to(m)
+
+    # Vorgemerkte Position für einen NEUEN Info-Punkt (gesetzt durch einen
+    # Kartenklick bei aktivem "Position per Kartenklick", siehe unten):
+    # als grauer Marker sichtbar, damit erkennbar ist, worauf sich das
+    # Formular in der Kennzahlen-Spalte gerade bezieht.
+    pending_note = st.session_state.get("_note_position")
+    if pending_note and st.session_state.get("note_click_mode"):
+        folium.Marker(
+            [pending_note["lat"], pending_note["lon"]],
+            tooltip="Position für neuen Punkt",
+            icon=folium.Icon(color="gray", icon="plus"),
         ).add_to(m)
 
     if plot_column != "none":
@@ -1257,18 +1779,49 @@ def _render_map_and_profile(
     # und deshalb nie remountete.)
     _track_sig = hashlib.md5(str(current_track_ids).encode()).hexdigest()[:8]
     _fmap_key = f"fmap_{_track_sig}_{map_height}"
-    map_state = st_folium(m, width="stretch", height=map_height, key=_fmap_key)
+    # Eigener Container mit Key 'mp_map': Im Höhen-Modus "fill" greift
+    # darüber das CSS zu, das den Karten-iframe auf den verbleibenden
+    # Platz bis zum Fensterrand streckt (siehe _FILL_CSS).
+    with _keyed_container("mp_map"):
+        map_state = st_folium(m, width="stretch", height=map_height, key=_fmap_key)
 
     # ----------------------------------------------------------------------
-    # Klick auf der KARTE auswerten (Planungsmodus): der nächstgelegene
-    # Trackpunkt zum Klick wird ermittelt (siehe _nearest_point_index) und
-    # als Unterteilungspunkt umgeschaltet (siehe _toggle_split_point) -
-    # funktional dasselbe wie der Profil-Klick weiter unten, nur mit Klick
-    # auf der Karte statt im Höhenprofil als Auslöser. Da der Planungsmodus
-    # nur bei genau einem ausgewählten Track aktiv ist (siehe
-    # render_map_page), reicht hier der einzige Eintrag in track_store.
+    # Klick auf der KARTE auswerten. Er hat je nach Einstellung zwei
+    # mögliche Bedeutungen, in dieser Rangfolge:
+    #
+    #   1. "Position per Kartenklick" (Checkbox in der Punkte-Verwaltung,
+    #      Schlüssel 'note_click_mode') ist aktiv -> der Klick merkt die
+    #      Koordinaten für einen NEUEN Info-Punkt vor. Diese Bedeutung hat
+    #      Vorrang, weil ein Info-Punkt gerade NICHT auf dem Track liegen
+    #      muss und der Klick deshalb nicht auf einen Trackpunkt
+    #      "eingefangen" werden darf. Im Planungsmodus bleiben die
+    #      Trennpunkte in dieser Zeit über das Höhenprofil setzbar.
+    #   2. Sonst im Planungsmodus: der nächstgelegene Trackpunkt zum Klick
+    #      wird ermittelt (siehe _nearest_point_index) und als
+    #      Unterteilungspunkt umgeschaltet (siehe _toggle_split_point) -
+    #      funktional dasselbe wie der Profil-Klick weiter unten.
+    #
+    # Da der Planungsmodus nur bei genau einem ausgewählten Track aktiv ist
+    # (siehe render_map_page), reicht dort der einzige Eintrag in
+    # track_store.
     # ----------------------------------------------------------------------
-    if planning_mode and not filters_changed and map_state is not None:
+    note_click_mode = bool(st.session_state.get("note_click_mode"))
+    if note_click_mode and not filters_changed and map_state is not None:
+        last_clicked = map_state.get("last_clicked")
+        if last_clicked is not None:
+            # Gleicher "zuletzt verarbeiteter Klick"-Schutz wie unten:
+            # st_folium liefert denselben Wert bis zum nächsten Klick
+            # erneut zurück, sonst entstünde eine Rerun-Schleife.
+            click_token = (round(last_clicked["lat"], 7), round(last_clicked["lng"], 7))
+            if st.session_state.get("_last_note_map_click") != click_token:
+                st.session_state["_last_note_map_click"] = click_token
+                st.session_state["_note_position"] = {
+                    "lat": float(last_clicked["lat"]),
+                    "lon": float(last_clicked["lng"]),
+                }
+                st.rerun()
+
+    elif planning_mode and not filters_changed and map_state is not None:
         last_clicked = map_state.get("last_clicked")
         if last_clicked is not None:
             click_track_id = df["track_id"].iloc[0]
@@ -1309,7 +1862,13 @@ def _render_map_and_profile(
     # on_select="rerun": ein Klick im Profil löst einen kompletten
     # Skript-Rerun aus; "event" enthält danach die Klick-Information
     # (welche Trace, welcher Punkt) für DIESEN Durchlauf.
-    event = st.plotly_chart(fig, on_select="rerun", key="my_chart_key", height=profile_height)
+    # Eigener Container mit Key 'mp_profile' - Gegenstück zu 'mp_map':
+    # Das Profil behält im Füllmodus seine Pixelhöhe, die Karte darüber
+    # bekommt den Rest (siehe _FILL_CSS).
+    with _keyed_container("mp_profile"):
+        event = st.plotly_chart(
+            fig, on_select="rerun", key="my_chart_key", height=profile_height
+        )
 
     # ----------------------------------------------------------------------
     # Klick im Profil auswerten und Auswahl in den Session State legen
@@ -1583,31 +2142,12 @@ def render_map_page(settings_container=None) -> None:
             help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
         )
 
-        st.radio(
-            "Höhe Karte + Profil",
-            options=["window", "manual"],
-            index=0,
-            key="map_profile_height_mode",
-            format_func=lambda x: "An Fensterhöhe anpassen" if x == "window" else "Manuell",
-            help=(
-                "'An Fensterhöhe anpassen' liest beim ersten Laden die "
-                "tatsächliche Browser-Fensterhöhe per JavaScript aus "
-                "(window.parent.innerHeight) und passt Karte + Profil "
-                "entsprechend an. Nach einer Fenster-Grössenänderung wird "
-                "der Wert beim nächsten Rerun aktualisiert. "
-                "Für eine sofortige, feste Höhe: 'Manuell' wählen."
-            ),
-        )
-        if st.session_state.map_profile_height_mode == "manual":
-            st.slider(
-                "Höhe Karte + Profil (px)",
-                min_value=_MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX,
-                max_value=_MAX_TOTAL_HEIGHT_PX,
-                step=100,
-                value=_DEFAULT_TOTAL_HEIGHT_PX,
-                key="map_profile_total_height_px",
-                help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
-            )
+        _render_height_settings()
+
+    # CSS des Füllmodus - muss vor dem Aufbau des Hauptbereichs im
+    # Dokument stehen, damit Karte und Profil gleich beim ersten Rendern
+    # in der richtigen Höhe erscheinen.
+    _render_fill_css()
 
     # ----------------------------------------------------------------------
     # Sidebar: Filter (Sport/Land/Jahr/Jahreszeit + Track-Baum)
@@ -1659,30 +2199,53 @@ def render_map_page(settings_container=None) -> None:
     # zugehörige Auswahl im Anzeigeeinstellungen-Bereich der Seitenleiste).
     map_height, profile_height = _resolve_map_profile_height()
 
+    # Info-Punkte der ausgewählten Tracks: einmal hier geladen (gecacht)
+    # für die Verwaltung in der Kennzahlen-Spalte und den Planungs-Export;
+    # _render_map_and_profile() holt sie sich für die Darstellung selbst.
+    notes = load_track_notes(tuple(sorted(df["track_id"].tolist())))
+    single_track_id = df["track_id"].iloc[0] if len(df) == 1 else None
+    single_gdf = precomputed_track_store[single_track_id] if single_track_id is not None else None
+
     with col_kpis:
-        with st.container(border=True):
+        with _keyed_container("mp_kpis", border=True):
             if planning_active:
-                track_id = df["track_id"].iloc[0]
                 _render_planning_kpis(
-                    precomputed_track_store[track_id], track_id, df["track_title"].iloc[0]
+                    single_gdf,
+                    single_track_id,
+                    df["track_title"].iloc[0],
+                    notes=notes,
                 )
             else:
                 _render_kpis(df)
             # Bestzeiten nur bei genau einem Track (siehe
             # _render_best_efforts).
-            if precomputed_track_store is not None:
+            if single_gdf is not None:
                 st.divider()
-                _render_best_efforts(
-                    precomputed_track_store[df["track_id"].iloc[0]]
-                )
+                _render_best_efforts(single_gdf)
+
+            # Info-Punkte: Liste, Bearbeiten und Neuanlage - in beiden
+            # Betriebsarten verfügbar (siehe _render_notes_panel).
+            _render_notes_panel(
+                notes,
+                gdf=single_gdf,
+                track_id=single_track_id,
+                track_title=df["track_title"].iloc[0] if single_track_id is not None else None,
+                planning_mode=planning_active,
+            )
 
     with col_map:
-        with st.container(border=True):
+        with _keyed_container("mp_box", border=True):
             if planning_active:
                 st.caption(
                     "📐 Planungsmodus: Klicke auf die Karte oder ins Höhenprofil, um "
-                    "Unterteilungspunkte zu setzen - ein erneuter Klick auf einen "
+                    "Trennpunkte zu setzen - ein erneuter Klick auf einen "
                     "bestehenden Punkt entfernt ihn wieder."
+                )
+            if st.session_state.get("note_click_mode"):
+                st.caption(
+                    "📍 Kartenklick setzt die Position für einen neuen Punkt "
+                    "(Formular links). Trennpunkte lassen sich solange über das "
+                    "Höhenprofil setzen."
                 )
             _render_map_and_profile(
                 df,
