@@ -124,8 +124,9 @@ hochladen.
    **"⬇️ GPX herunterladen"** bereit, das die ursprünglich hochgeladene
    Datei wieder ausgibt. Alle vorhandenen Einträge werden zusätzlich in
    einer Übersichtstabelle angezeigt; dort lässt sich die Spalte "Track"
-   **direkt bearbeiten**, um mehrere Titel auf einmal umzubenennen
-   (Speichern per Knopf darunter).
+   **direkt bearbeiten**, um mehrere Titel auf einmal umzubenennen.
+   Der Knopf darunter zeigt die Zahl der geänderten Zeilen und speichert
+   auch nur diese; leer gelassene Titel werden übersprungen und gemeldet.
 4. Im Bereich "Track-Metadaten neu berechnen" (Tab "Tracks") lassen sich
    "Zeit in Bewegung" sowie Auf-/Abstieg eines einzelnen oder aller
    Tracks anhand neu eingegebener Schwellwerte (minimale Geschwindigkeit

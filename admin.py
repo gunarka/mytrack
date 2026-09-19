@@ -312,6 +312,18 @@ def _render_track_recalculate_form(tracks_df) -> None:
         st.rerun()
 
 
+def _clean_title(value) -> str:
+    """
+    Normalisiert einen Titel aus der Übersichtstabelle: fehlende Werte
+    (None/NaN) werden zu einem leeren String, Leerzeichen am Rand fallen
+    weg. So vergleichen sich alte und neue Titel zuverlässig, und ein
+    versehentlich geleertes Feld lässt sich sauber erkennen.
+    """
+    if value is None or value != value:  # NaN ist ungleich sich selbst
+        return ""
+    return str(value).strip()
+
+
 def _render_track_overview(tracks_df) -> None:
     """
     Tabelle aller vorhandenen Tracks - die Spalte "Track" ist direkt
@@ -344,14 +356,33 @@ def _render_track_overview(tracks_df) -> None:
         "file_name": "Datei",
     }).drop(columns=["sport_id", "tour_id"])
 
-    st.caption("Titel in der Spalte 'Track' lassen sich direkt bearbeiten.")
-    editable_columns = [c for c in display_df.columns if c not in ("track_id", "Track")]
+    # WICHTIG: track_id kommt aus DuckDB als uuid.UUID-Objekt. st.data_editor
+    # wandelt solche Arrow-fremden Spalten im zurückgegebenen DataFrame still
+    # in Strings um - ein Vergleich UUID == str wäre danach immer falsch und
+    # die Zuordnung der bearbeiteten Zeilen würde ins Leere laufen. Deshalb
+    # hier einmal bewusst auf Strings normalisieren (DuckDB akzeptiert
+    # Strings beim späteren UPDATE ... WHERE track_id = ? ohne Weiteres).
+    display_df["track_id"] = display_df["track_id"].astype(str)
+
+    st.caption(
+        f"{len(display_df)} Tracks. Titel in der Spalte 'Track' lassen sich "
+        "direkt bearbeiten; gespeichert werden nur geänderte Zeilen."
+    )
+    locked_columns = [c for c in display_df.columns if c not in ("track_id", "Track")]
+    # Der Editor merkt sich Eingaben anhand der Zeilenposition, nicht anhand
+    # der track_id. Ändert sich der Bestand (Track angelegt, gelöscht oder
+    # neu berechnet), zeigen gemerkte Positionen auf andere Zeilen - der
+    # Schlüssel enthält deshalb den aktuellen Bestand und startet den Editor
+    # in diesem Fall sauber neu.
+    editor_key = "track_overview_editor_" + str(
+        hash(tuple(display_df["track_id"]))
+    )
     edited_df = st.data_editor(
         display_df,
         hide_index=True,
         width="stretch",
-        key="track_overview_editor",
-        disabled=editable_columns,
+        key=editor_key,
+        disabled=locked_columns,
         column_config={
             # track_id wird gebraucht, um die Änderungen wieder den
             # richtigen Zeilen zuzuordnen - für den Nutzer aber unnötig,
@@ -362,16 +393,36 @@ def _render_track_overview(tracks_df) -> None:
     )
 
     # Nur die tatsächlich geänderten Titel schreiben (statt bei jedem Klick
-    # alle Zeilen zu aktualisieren).
-    changed = {
-        row.track_id: row.Track
-        for row in edited_df.itertuples(index=False)
-        if row.Track != display_df.loc[display_df["track_id"] == row.track_id, "Track"].iloc[0]
+    # alle Zeilen zu aktualisieren). Der Abgleich läuft über ein Dictionary
+    # statt über eine Suche je Zeile: das ist schneller und kann - anders als
+    # die frühere .iloc[0]-Suche - bei einer unbekannten track_id nicht mehr
+    # mit einem IndexError abbrechen.
+    original_titles = {
+        str(track_id): _clean_title(title)
+        for track_id, title in zip(display_df["track_id"], display_df["Track"])
     }
+    changed: dict[str, str] = {}
+    empty_titles = 0
+    for row in edited_df.itertuples(index=False):
+        track_id = str(row.track_id)
+        if track_id not in original_titles:
+            continue
+        new_title = _clean_title(row.Track)
+        if not new_title:
+            empty_titles += 1
+            continue
+        if new_title != original_titles[track_id]:
+            changed[track_id] = new_title
+
+    if empty_titles:
+        st.warning(
+            f"{empty_titles} Zeile(n) ohne Titel werden nicht gespeichert."
+        )
     if st.button(
         f"Titel speichern ({len(changed)})",
         disabled=not changed,
         key="track_overview_save",
+        help="Speichert ausschließlich die in der Tabelle geänderten Titel.",
     ):
         rename_tracks(changed)
         st.success(f"{len(changed)} Titel gespeichert.")

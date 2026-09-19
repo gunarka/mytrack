@@ -212,6 +212,16 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
   Glättung) – Vergleichswerte nur mit identischen Parametern.
 - `config.toml` im Wurzelverzeichnis ist wirkungslos; wirksam ist
   `.streamlit/config.toml`.
+- `st.data_editor` gibt Arrow-fremde Spalten **als Strings** zurück. Die
+  IDs kommen aus DuckDB aber als `uuid.UUID`-Objekte – ein Vergleich
+  `uuid == str` ist immer falsch. Vor dem Editor deshalb
+  `df["track_id"] = df["track_id"].astype(str)` setzen (DuckDB nimmt
+  Strings in `WHERE track_id = ?` an) und den Abgleich alt/neu über ein
+  Dictionary statt über eine Suche je Zeile führen.
+- `st.data_editor` merkt sich Eingaben je **Zeilenposition**, bei festem
+  `key` auch dann, wenn sich die Daten geändert haben. Tabellen mit
+  veränderlichem Bestand bekommen deshalb einen Schlüssel, der den
+  aktuellen Bestand enthält (siehe `_render_track_overview()`).
 - JSON in `<script>`: `</` muss maskiert werden (siehe
   `_component_html()`), sonst beendet ein Track-Titel mit `</script>` den
   Skriptblock.
