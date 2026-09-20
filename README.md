@@ -17,7 +17,7 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 | `app.py`         | **Einstiegspunkt** (`streamlit run app.py`). Seitenkonfiguration, Titel/Beschreibung in der Seitenleiste, Navigation zwischen den Seiten. |
 | `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, Bestzeiten-Auswertung, GPX-Export, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen von Karte und Statistik (`load_metadata`, `load_track_files`, `load_track_notes`, `load_heatmap_points`). Enthält keinerlei Oberflächen-Code. |
 | `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
-| `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Drei Tabs (Tracks, Touren, Sportarten), jeweils mit Formular zum Neuanlegen, Formular zum Bearbeiten/Löschen und einer Übersichtstabelle. |
+| `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Eigenständiger Export-Bereich ("⬇️ GPX-Export") oberhalb von drei Tabs (Tracks, Touren, Sportarten), die jeweils ein Formular zum Neuanlegen, ein Formular zum Bearbeiten/Löschen und eine Übersichtstabelle enthalten. |
 | `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl (Touren eingeklappt), Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion, die Info-Punkte sowie der Planungsmodus. |
 | `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter, Kennzahlen und den Planungs-Schalter wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
@@ -151,6 +151,12 @@ hochladen.
    alle Tracks der Tour in einer Datei, zeitlich sortiert und je Etappe
    als eigenes Segment (`<trkseg>`), damit Pausen zwischen den Etappen
    nicht als Luftlinie interpretiert werden.
+6. Oberhalb der drei Tabs steht der eigenständige Bereich
+   **"⬇️ GPX-Export"**: beliebig viele einzelne Tracks und/oder ganze
+   Touren (jeweils mit allen ihren Tracks) auswählen und gemeinsam
+   herunterladen. Bei genau einer Auswahl gibt es direkt eine einzelne
+   GPX-Datei, bei mehreren ein ZIP-Archiv mit je einer Datei pro Track
+   bzw. Tour. Punkte (Info-Punkte) werden dabei immer mit exportiert.
 
 **Karte** (Seite "Karte"):
 

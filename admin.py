@@ -39,6 +39,7 @@ from functions import (
     delete_sport,
     delete_tour,
     delete_track,
+    export_selection_gpx,
     export_tour_gpx,
     get_sports,
     get_sports_overview,
@@ -593,10 +594,78 @@ def _render_sports_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# GPX-Export
+# ---------------------------------------------------------------------------
+def _render_gpx_export_expander(tracks_df, tours_df) -> None:
+    """
+    Eigenständiger Export-Bereich oberhalb der drei Tabs: einzelne Tracks
+    und/oder ganze Touren (jeweils mit allen ihren Tracks) lassen sich
+    frei auswählen und gemeinsam herunterladen.
+
+    Bei genau EINER Auswahl (ein Track ODER eine Tour) liefert
+    export_selection_gpx() direkt eine einzelne GPX-Datei; bei mehreren
+    Auswahlen ein ZIP-Archiv mit je einer Datei pro Track bzw. Tour.
+    Info-Punkte werden in jedem Fall mit exportiert (siehe
+    export_selection_gpx() in functions.py).
+    """
+    with st.expander("⬇️ GPX-Export", expanded=False):
+        if tracks_df.empty and tours_df.empty:
+            st.info("Noch keine Tracks oder Touren vorhanden.")
+            return
+
+        st.caption(
+            "Einzelne Tracks und/oder ganze Touren auswählen und "
+            "herunterladen. Bei mehr als einer Auswahl wird ein "
+            "ZIP-Archiv mit je einer GPX-Datei erzeugt; Info-Punkte "
+            "werden immer mit exportiert."
+        )
+
+        track_options = list(zip(tracks_df["track_id"], tracks_df["track_title"]))
+        tour_options = list(zip(tours_df["tour_id"], tours_df["tour_title"]))
+
+        selected_tracks = st.multiselect(
+            "Einzelne Tracks",
+            options=track_options,
+            format_func=lambda t: t[1],
+            key="gpx_export_tracks",
+        )
+        selected_tours = st.multiselect(
+            "Touren (jeweils alle enthaltenen Tracks als eine Datei)",
+            options=tour_options,
+            format_func=lambda t: t[1],
+            key="gpx_export_tours",
+        )
+
+        track_ids = [t[0] for t in selected_tracks]
+        tour_ids = [t[0] for t in selected_tours]
+        total = len(track_ids) + len(tour_ids)
+        if total == 0:
+            st.caption("Noch nichts ausgewählt.")
+            return
+
+        export = export_selection_gpx(track_ids, tour_ids)
+        if export is None:
+            st.warning("Für die Auswahl konnte keine GPX-Datei erzeugt werden.")
+            return
+
+        file_name, file_bytes, mime = export
+        st.download_button(
+            f"⬇️ Auswahl herunterladen ({total})",
+            data=file_bytes,
+            file_name=file_name,
+            mime=mime,
+            key="gpx_export_download",
+            width="stretch",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Öffentliche Einstiegsfunktion
 # ---------------------------------------------------------------------------
 def render_admin_page() -> None:
-    """Baut die komplette Verwaltungsseite mit ihren drei Tabs auf."""
+    """Baut die komplette Verwaltungsseite mit Export-Bereich und den drei Tabs auf."""
+    _render_gpx_export_expander(get_tracks(), get_tours())
+
     tab_track, tab_tour, tab_sport = st.tabs(["Tracks", "Touren", "Sportarten"])
 
     with tab_track:

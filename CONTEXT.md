@@ -87,6 +87,14 @@ Beim Löschen eines Tracks werden seine Info-Punkte mitgelöscht
 (`build_note_waypoints()` / `_with_note_waypoints()`, genutzt von
 `get_track_file()`, `export_tour_gpx()` und dem Planungs-ZIP in `map.py`).
 
+**GPX-Export in der Verwaltung:** `export_selection_gpx(track_ids,
+tour_ids)` bündelt eine beliebige Auswahl aus einzelnen Tracks (via
+`get_track_file()`) und/oder ganzen Touren (via `export_tour_gpx()`) zu
+EINEM Download - eine Datei direkt bei genau einer Auswahl, sonst ein
+ZIP (Namenskollisionen werden mit Zähler-Suffix aufgelöst). Genutzt vom
+eigenständigen Expander `_render_gpx_export_expander()` in `admin.py`,
+der oberhalb der drei Tabs steht (siehe `render_admin_page()`).
+
 **Schema-Änderungen:** Neue Spalten zusätzlich in
 `_ensure_schema_migrations()` ergänzen (läuft bei jedem
 Verbindungsaufbau). Bestandsdatenbanken dürfen nicht auf

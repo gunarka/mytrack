@@ -32,6 +32,7 @@ import signal
 import threading
 import time
 import uuid
+import zipfile
 
 import duckdb
 import geopandas as gpd
@@ -761,6 +762,74 @@ def export_tour_gpx(tour_id: str) -> bytes | None:
         build_note_waypoints(load_track_notes(tuple(str(row[0]) for row in rows)))
     )
     return merged.to_xml().encode("utf-8")
+
+
+def export_selection_gpx(
+    track_ids: list[str] | None = None,
+    tour_ids: list[str] | None = None,
+) -> tuple[str, bytes, str] | None:
+    """
+    Fasst eine beliebige Auswahl aus einzelnen Tracks und/oder ganzen
+    Touren zu EINEM Download zusammen - für den Export-Bereich in der
+    Verwaltung (siehe admin.py).
+
+    Jede Tour wird dabei wie bei export_tour_gpx() zu einer einzigen
+    GPX-Datei zusammengefasst (ein <trk> mit einem <trkseg> je
+    enthaltenem Track); jeder einzeln ausgewählte Track bleibt eine
+    eigene Datei. Info-Punkte werden in jedem Fall mit exportiert (siehe
+    get_track_file() / export_tour_gpx()).
+
+    Besteht die gesamte Auswahl aus genau EINER Datei (ein Track ODER
+    eine Tour), wird diese Datei direkt zurückgegeben. Bei mehreren
+    Dateien entsteht stattdessen ein ZIP-Archiv, damit sich auch eine
+    gemischte Auswahl aus mehreren Tracks und/oder Touren mit einem
+    Klick herunterladen lässt.
+
+    Gibt (Dateiname, Bytes, MIME-Typ) zurück, oder None, wenn die
+    Auswahl leer ist oder keine der angegebenen IDs (mehr) existiert
+    bzw. keine Tracks enthält.
+    """
+    files: list[tuple[str, bytes]] = []
+
+    for track_id in track_ids or []:
+        result = get_track_file(track_id)
+        if result is not None:
+            files.append(result)
+
+    if tour_ids:
+        con = get_connection()
+        for tour_id in tour_ids:
+            gpx_bytes = export_tour_gpx(tour_id)
+            if gpx_bytes is None:
+                continue
+            title_row = con.execute(
+                "SELECT tour_title FROM tours WHERE tour_id = ?", [tour_id]
+            ).fetchone()
+            title = (title_row[0] if title_row else None) or "Tour"
+            files.append((f"{title}.gpx".replace("/", "_"), gpx_bytes))
+
+    if not files:
+        return None
+
+    if len(files) == 1:
+        file_name, file_bytes = files[0]
+        return file_name, file_bytes, "application/gpx+xml"
+
+    # Mehrere Dateien: als ZIP bündeln. Namenskollisionen (z.B. zwei
+    # Tracks mit identischem Titel) werden mit einem Zähler-Suffix
+    # aufgelöst, damit keine Datei im Archiv eine andere überschreibt.
+    buffer = io.BytesIO()
+    used_names: dict[str, int] = {}
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file_name, file_bytes in files:
+            count = used_names.get(file_name, 0)
+            used_names[file_name] = count + 1
+            if count:
+                stem, _, ext = file_name.rpartition(".")
+                file_name = f"{stem} ({count}).{ext}" if stem else f"{file_name} ({count})"
+            archive.writestr(file_name, file_bytes)
+
+    return "gpx_export.zip", buffer.getvalue(), "application/zip"
 
 
 # ---------------------------------------------------------------------------
