@@ -1243,17 +1243,29 @@ def render_linked_map_page(settings_container=None) -> None:
 # Fenster (`window.parent` ist von beiden Komponenten aus dasselbe Objekt,
 # da beide direkte Kind-iframes derselben Streamlit-Seite sind) auf genau
 # diese Nachricht und liefert sie als Rückgabewert an Python.
-_NOTE_BRIDGE_JS = """
-await new Promise((resolve) => {
-  function handler(e) {
-    if (e && e.data && e.data.mytrackNote) {
-      window.parent.removeEventListener("message", handler);
-      resolve(JSON.stringify(e.data.mytrackNote));
-    }
-  }
-  window.parent.addEventListener("message", handler);
-})
-"""
+# ACHTUNG (ASI-Falle): streamlit_javascript führt den String über
+# `eval("(async () => {return " + js_code + "})()")` aus (siehe dessen
+# Quelltext). Begänne diese Zeichenkette mit einem Zeilenumbruch, würde
+# JavaScripts automatische Semikolon-Einfügung daraus "return;"
+# machen - die Funktion läge sofort mit 'undefined' zurück, OHNE die
+# Promise unten je zu erzeugen. Der Listener auf window.parent würde dann
+# NIE registriert: postMessage aus der Kartenkomponente hätte keinen
+# Empfänger, neue Punkte würden also still und leise verworfen (kein
+# Fehler sichtbar, "Speichern" scheint zu funktionieren, der Punkt
+# erscheint aber nie auf der Karte). Deshalb hier bewusst EIN
+# zusammenhängender String ohne führenden Zeilenumbruch, direkt hinter
+# "await".
+_NOTE_BRIDGE_JS = (
+    "await new Promise((resolve) => {"
+    "  function handler(e) {"
+    "    if (e && e.data && e.data.mytrackNote) {"
+    "      window.parent.removeEventListener('message', handler);"
+    "      resolve(JSON.stringify(e.data.mytrackNote));"
+    "    }"
+    "  }"
+    "  window.parent.addEventListener('message', handler);"
+    "})"
+)
 
 
 def _handle_note_bridge(
