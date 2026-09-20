@@ -130,7 +130,9 @@ führendem Unterstrich.
   `kpi_col_width_pct`, `map_profile_height_mode`,
   `map_profile_total_height_px` sowie alle Filter-Keys UND `planning_mode`/
   `split_points` werden mit der Seite "Karte" geteilt, damit Auswahl und
-  Planung beim Seitenwechsel stehen bleiben)
+  Planung beim Seitenwechsel stehen bleiben), `_lm_note_bridge_gen`
+  (Zähler für den `key` der `streamlit-javascript`-Rückkanal-Komponente,
+  siehe `map_linked._handle_note_bridge`)
 - Planung: `planning_mode`, `split_points`, `_last_planning_click`,
   `_last_planning_map_click`, `_last_track_ids`
 - Beenden: `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
@@ -213,15 +215,36 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
   Länge N. Die Trennpunkt-Indizes beziehen sich auf das volle DataFrame und
   werden in `_build_payload()` per `np.searchsorted` auf den nächsten
   tatsächlich übertragenen (ausgedünnten) Punkt abgebildet.
-- Die Komponente ist eine **Einbahnstraße**: kein Rückkanal nach
-  Streamlit. Trennpunkte werden hier nur **angezeigt**; gesetzt/gelöscht
-  werden sie auf der Seite "Karte" bzw. über die Punkteliste in der
-  Kennzahlen-Spalte. Schalter (`map.render_planning_toggle()`), Kennzahlen
-  je Teil und GPX-Export gibt es auf beiden Seiten. Ein Rückkanal für das
-  Setzen per Klick bräuchte eine echte bidirektionale Custom Component
-  (Frontend-Build) oder `streamlit-javascript`.
-- Keine neuen Python-Abhängigkeiten; die beiden JS-Bibliotheken kommen
-  versionsgepinnt vom CDN (`_CDN_*`).
+- Die Komponente selbst ist eine **Einbahnstraße**: `st.components.v1.html()`
+  liefert nur einmal Daten hinein, kein eingebauter Rückkanal nach
+  Streamlit. Trennpunkte werden hier deshalb weiterhin nur **angezeigt**;
+  gesetzt/gelöscht werden sie auf der Seite "Karte" bzw. über die
+  Punkteliste in der Kennzahlen-Spalte. Schalter
+  (`map.render_planning_toggle()`), Kennzahlen je Teil und GPX-Export gibt
+  es auf beiden Seiten.
+- **Rückkanal für "📍 Punkt speichern?" (neue Info-Punkte):** Rechtsklick
+  auf die Karte öffnet ein schwebendes JS-Overlay (Titel + Beschreibung,
+  siehe `.note-overlay`/`openNoteOverlay()` in der HTML-Vorlage). "Speichern"
+  schickt die Eingabe per `window.parent.postMessage({mytrackNote: {...}})`.
+  Eine unsichtbar gerenderte `streamlit-javascript`-Komponente
+  (`_NOTE_BRIDGE_JS`, siehe `_handle_note_bridge()`) lauscht im selben
+  übergeordneten Fenster auf genau diese Nachricht (`window.parent` ist von
+  beiden Komponenten-iframes aus dasselbe Objekt, da beide direkte
+  Kind-iframes derselben Streamlit-Seite sind und wegen
+  `allow-same-origin` same-origin darauf zugreifen dürfen - dasselbe
+  Prinzip wie bei `st_javascript("window.parent.innerHeight")` in
+  `map._resolve_map_profile_height()`) und liefert sie als Rückgabewert an
+  Python. Nach dem Verarbeiten wird die Bridge-Komponente über einen in
+  `session_state["_lm_note_bridge_gen"]` gezählten Suffix im `key` neu
+  gemountet, damit sie nicht bei jedem weiteren Rerun denselben Punkt
+  erneut meldet. Nur möglich bei genau einem ausgewählten Track (JS prüft
+  `SINGLE_TRACK_ID`, Python prüft `trackId` gegen `single_track_id` erneut).
+  Diese Bridge trägt bewusst NUR den einen Fall "neuer Info-Punkt" - für
+  Trennpunkte (s.o.) wurde sie nicht verwendet, um die Komponente nicht
+  unnötig zu verkomplizieren.
+- Keine neuen Python-Abhängigkeiten (`streamlit-javascript` stand bereits
+  vor dieser Änderung in requirements.txt, siehe `map.py`); die beiden
+  JS-Bibliotheken Leaflet/uPlot kommen versionsgepinnt vom CDN (`_CDN_*`).
 
 ## Höhe von Karte und Profil
 

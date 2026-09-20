@@ -49,17 +49,28 @@ Funktionsumfang
 7. Start (S, grün), Ende (Z, rot) und - im Planungsmodus - die gesetzten
    Unterteilungspunkte (orange, nummeriert) erscheinen sowohl auf der Karte
    als auch im Höhenprofil, jeweils an derselben Kilometerstelle.
+8. Rechtsklick auf die Karte öffnet ein schwebendes Overlay "📍 Punkt
+   speichern?" (Titel + Beschreibung); ist genau ein Track ausgewählt,
+   legt "Speichern" dort einen neuen Info-Punkt an der angeklickten
+   Stelle an (siehe "Rückkanal" unten).
 
 Bewusste Einschränkungen
 ------------------------
-- Die Komponente ist eine Einbahnstraße: Sie meldet nichts an Streamlit
-  zurück. Unterteilungspunkte lassen sich hier deshalb nur ANZEIGEN;
-  gesetzt und gelöscht werden sie auf der Seite "Karte" (map.py) bzw. über
-  die Punkteliste in der Kennzahlen-Spalte, da das Serverzustand braucht.
-  Der Schalter "📐 Planung" und die Kennzahlen je Teil sind dagegen auf
-  beiden Seiten vorhanden (siehe map.render_planning_toggle). Für einen
-  Rückkanal wäre eine echte bidirektionale Custom Component nötig
-  (Frontend-Build) oder `streamlit-javascript`.
+- Die Komponente selbst ist eine Einbahnstraße: `st.components.v1.html()`
+  liefert nur einmal Daten hinein, ein Kartenklick käme normalerweise nie
+  in Streamlit an. Für den einen Fall, in dem trotzdem ein Rückkanal nötig
+  ist (neuen Info-Punkt per Rechtsklick anlegen, siehe Punkt 8 oben), wird
+  daher ein kleiner Trick verwendet: Die Komponente schickt die Eingaben
+  per `window.parent.postMessage(...)`; eine unsichtbare
+  `streamlit-javascript`-Komponente (echte bidirektionale Custom
+  Component) lauscht im selben übergeordneten Fenster auf diese Nachricht
+  und liefert sie an Python zurück (siehe `_handle_note_bridge` weiter
+  unten). Unterteilungspunkte gehen diesen Weg bewusst NICHT mit - sie
+  lassen sich hier weiterhin nur ANZEIGEN; gesetzt und gelöscht werden sie
+  auf der Seite "Karte" (map.py) bzw. über die Punkteliste in der
+  Kennzahlen-Spalte. Der Schalter "📐 Planung" und die Kennzahlen je Teil
+  sind dagegen auf beiden Seiten vorhanden (siehe
+  map.render_planning_toggle).
 - Die JS-Bibliotheken werden von einem CDN geladen (siehe _CDN_*), es wird
   also eine Internetverbindung benötigt. Je Bibliothek sind zwei CDNs
   hinterlegt; schlägt das erste fehl, wird das zweite versucht. Klappt
@@ -89,10 +100,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_javascript import st_javascript
 
-from functions import load_track_files, load_track_notes, process_track
+from functions import insert_track_note, load_track_files, load_track_notes, process_track
 from map import (
     _keyed_container,
+    _nearest_point_index,
     _render_fill_css,
     _render_height_settings,
     _render_kpis,
@@ -454,6 +467,27 @@ _HTML_TEMPLATE = """<style>
     padding: 3px 8px; font-size: 12px; cursor: pointer;
   }
   #reset:hover { background: #f0f0f0; }
+  #map { position: relative; }
+  .note-overlay {
+    position: absolute; z-index: 700; width: 220px;
+    background: #fff; border: 1px solid #bbb; border-radius: 6px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.28); padding: 8px; font-size: 12px;
+  }
+  .note-overlay-head { font-weight: 600; margin-bottom: 6px; }
+  .note-overlay-hint { color: #666; margin-bottom: 8px; }
+  .note-overlay input, .note-overlay textarea {
+    width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 4px 6px;
+    font-size: 12px; font-family: inherit; border: 1px solid #ccc; border-radius: 4px;
+    resize: vertical;
+  }
+  .note-overlay-actions { display: flex; gap: 6px; }
+  .note-overlay-actions button {
+    flex: 1; padding: 4px 6px; font-size: 12px; border-radius: 4px;
+    border: 1px solid #ccc; background: #f7f7f7; cursor: pointer;
+  }
+  .note-overlay-actions .note-save { background: #1E88E5; color: #fff; border-color: #1E88E5; }
+  .note-overlay-actions .note-save:disabled { opacity: 0.6; cursor: default; }
+  .note-overlay-actions button:hover:not(:disabled) { filter: brightness(0.95); }
 </style>
 
 <div id="wrap">
@@ -894,6 +928,77 @@ map.on("mousemove", e => {
 });
 map.on("mouseout", () => pinVisible(false));
 
+/* ---------------------------------------------------------------------
+   6c. Rechtsklick auf die Karte -> Overlay "📍 Punkt speichern?".
+       Die Komponente kann selbst nichts an Streamlit zurückmelden (siehe
+       Moduldocstring); stattdessen wird die Eingabe per postMessage an
+       das übergeordnete Fenster geschickt, wo eine unsichtbare
+       streamlit-javascript-Komponente darauf lauscht und den neuen Punkt
+       serverseitig anlegt (siehe map_linked._handle_note_bridge). Neue
+       Punkte lassen sich nur anlegen, wenn genau EIN Track ausgewählt
+       ist - wie in der Punkteliste links.
+   --------------------------------------------------------------------- */
+const SINGLE_TRACK_ID = T.length === 1 ? T[0].id : null;
+let noteOverlayEl = null;
+function closeNoteOverlay() {
+  if (noteOverlayEl) { noteOverlayEl.remove(); noteOverlayEl = null; }
+}
+function openNoteOverlay(latlng, point) {
+  closeNoteOverlay();
+  const mapEl = document.getElementById("map");
+  const rect = mapEl.getBoundingClientRect();
+  const box = document.createElement("div");
+  box.className = "note-overlay";
+  box.style.left = Math.max(4, Math.min(point.x, rect.width - 228)) + "px";
+  box.style.top = Math.max(4, Math.min(point.y, rect.height - 40)) + "px";
+
+  if (!SINGLE_TRACK_ID) {
+    box.innerHTML =
+      '<div class="note-overlay-head">📍 Punkt speichern?</div>'
+      + '<div class="note-overlay-hint">Dazu links in der Punkteliste '
+      + 'genau einen Track auswählen.</div>'
+      + '<div class="note-overlay-actions">'
+      + '<button class="note-cancel" type="button">Schließen</button></div>';
+    mapEl.appendChild(box);
+    noteOverlayEl = box;
+    box.querySelector(".note-cancel").addEventListener("click", closeNoteOverlay);
+    return;
+  }
+
+  box.innerHTML =
+    '<div class="note-overlay-head">📍 Punkt speichern?</div>'
+    + '<input type="text" class="note-title" maxlength="120" '
+    + 'placeholder="Titel (z.B. Hütte, Aussicht)">'
+    + '<textarea class="note-text" maxlength="1000" rows="2" '
+    + 'placeholder="Beschreibung (optional)"></textarea>'
+    + '<div class="note-overlay-actions">'
+    + '<button class="note-save" type="button">Speichern</button>'
+    + '<button class="note-cancel" type="button">Abbrechen</button></div>';
+  mapEl.appendChild(box);
+  noteOverlayEl = box;
+  const titleInput = box.querySelector(".note-title");
+  const textInput = box.querySelector(".note-text");
+  const saveBtn = box.querySelector(".note-save");
+  titleInput.focus();
+  box.querySelector(".note-cancel").addEventListener("click", closeNoteOverlay);
+  saveBtn.addEventListener("click", () => {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Wird gespeichert …";
+    window.parent.postMessage({
+      mytrackNote: {
+        trackId: SINGLE_TRACK_ID,
+        lat: latlng.lat,
+        lon: latlng.lng,
+        title: titleInput.value,
+        text: textInput.value,
+      },
+    }, "*");
+    setTimeout(closeNoteOverlay, 400);
+  });
+}
+map.on("contextmenu", e => openNoteOverlay(e.latlng, e.containerPoint));
+map.on("movestart zoomstart dragstart", closeNoteOverlay);
+
 /* "Alles zeigen": Profil-Zoom und Kartenausschnitt zurücksetzen */
 document.getElementById("reset").addEventListener("click", () => {
   u.setScale("x", { min: xs[0], max: xs[N - 1] });
@@ -1049,6 +1154,13 @@ def render_linked_map_page(settings_container=None) -> None:
         else None
     )
 
+    # Rückkanal für "📍 Punkt speichern?" (Rechtsklick auf die Karte, siehe
+    # _handle_note_bridge). Löst diese einen neuen Punkt aus, rerunnt sie
+    # die Seite selbst - der restliche Seitenaufbau unten läuft dann mit
+    # dem neu angelegten Punkt bereits in 'notes' (siehe load_track_notes
+    # oben, das cached DataFrame wird beim Rerun neu geladen).
+    _handle_note_bridge(single_gdf, single_track_id, planning_active)
+
     with col_kpis:
         with _keyed_container("mp_kpis", border=True):
             if planning_active:
@@ -1065,9 +1177,11 @@ def render_linked_map_page(settings_container=None) -> None:
                 _render_kpis(df)
 
             # Info-Punkte: dieselbe Verwaltung wie auf der Seite "Karte".
-            # Die Position per Kartenklick zu wählen geht dort allerdings
-            # nicht - die Komponente meldet nichts an Streamlit zurück;
-            # hier bleiben die Koordinatenfelder.
+            # 'allow_map_click' (der Checkbox-Umweg über st_folium) bleibt
+            # hier aus - stattdessen per Rechtsklick direkt auf der Karte
+            # rechts speichern (siehe _handle_note_bridge). Das Formular
+            # unten mit den Koordinatenfeldern bleibt als Alternative
+            # bestehen, z.B. um bereits angelegte Punkte zu bearbeiten.
             _render_notes_panel(
                 notes,
                 gdf=single_gdf,
@@ -1079,6 +1193,11 @@ def render_linked_map_page(settings_container=None) -> None:
 
     with col_map:
         with _keyed_container("mp_box", border=True):
+            if single_track_id is not None:
+                st.caption(
+                    "💡 Rechtsklick auf die Karte speichert einen neuen "
+                    "Punkt direkt an dieser Stelle."
+                )
             if planning_active:
                 st.caption(
                     "📐 Planungsmodus: Die Trennpunkte werden in Karte und "
@@ -1112,6 +1231,82 @@ def render_linked_map_page(settings_container=None) -> None:
                     "Trackpunkt übertragen (Gesamtauswahl zu groß). Kennzahlen "
                     "links basieren unverändert auf allen Punkten."
                 )
+
+
+# --------------------------------------------------------------------------
+# Rückkanal für "📍 Punkt speichern?" (Rechtsklick auf die Karte)
+# --------------------------------------------------------------------------
+# `st.components.v1.html()` kann selbst keine Werte an Streamlit zurück-
+# melden (siehe Moduldocstring). Der Trick: Die Kartenkomponente schickt
+# die Eingaben per `window.parent.postMessage(...)`; die folgende, unsicht-
+# bare `streamlit-javascript`-Komponente lauscht im selben übergeordneten
+# Fenster (`window.parent` ist von beiden Komponenten aus dasselbe Objekt,
+# da beide direkte Kind-iframes derselben Streamlit-Seite sind) auf genau
+# diese Nachricht und liefert sie als Rückgabewert an Python.
+_NOTE_BRIDGE_JS = """
+await new Promise((resolve) => {
+  function handler(e) {
+    if (e && e.data && e.data.mytrackNote) {
+      window.parent.removeEventListener("message", handler);
+      resolve(JSON.stringify(e.data.mytrackNote));
+    }
+  }
+  window.parent.addEventListener("message", handler);
+})
+"""
+
+
+def _handle_note_bridge(
+    single_gdf: pd.DataFrame | None, single_track_id, planning_active: bool
+) -> None:
+    """
+    Verarbeitet einen per Rechtsklick-Overlay gespeicherten Punkt (siehe
+    _NOTE_BRIDGE_JS oben) und legt ihn als Info-Punkt an.
+
+    `st_javascript` wartet asynchron auf die postMessage-Nachricht und
+    liefert bei jedem Rerun bis dahin 0 zurück; erst wenn die Nachricht
+    eintrifft, wird der eigentliche Wert geliefert. Damit derselbe Punkt
+    danach nicht bei jedem weiteren Rerun erneut gespeichert wird, bekommt
+    die Komponente über einen in session_state gezählten Suffix im 'key'
+    einen frischen Mount - das startet in der Komponente eine neue,
+    NOCH NICHT erfüllte Promise.
+
+    Ein Punkt lässt sich nur anlegen, wenn genau EIN Track ausgewählt ist
+    (dieselbe Regel wie im Formular der Punkteliste); die Komponente prüft
+    das bereits selbst (siehe SINGLE_TRACK_ID in der HTML-Vorlage), hier
+    wird sie zur Sicherheit serverseitig wiederholt.
+    """
+    gen = st.session_state.get("_lm_note_bridge_gen", 0)
+    raw = st_javascript(_NOTE_BRIDGE_JS, key=f"lm_note_bridge_{gen}")
+    if not raw:
+        return
+    try:
+        incoming = json.loads(raw)
+    except (TypeError, ValueError):
+        incoming = None
+    # Komponente für den nächsten Punkt neu mounten, sobald diese Nachricht
+    # verarbeitet wurde - unabhängig davon, ob sie gültig war.
+    st.session_state["_lm_note_bridge_gen"] = gen + 1
+    if not incoming or single_gdf is None or single_track_id is None:
+        return
+    if str(incoming.get("trackId")) != str(single_track_id):
+        return
+    try:
+        lat, lon = float(incoming["lat"]), float(incoming["lon"])
+    except (KeyError, TypeError, ValueError):
+        return
+    point_index = _nearest_point_index(single_gdf, lat, lon)
+    insert_track_note(
+        single_track_id,
+        (incoming.get("title") or "").strip() or "Punkt",
+        (incoming.get("text") or "").strip(),
+        lat,
+        lon,
+        float(single_gdf["ele"].iloc[point_index]),
+        point_index,
+        note_kind="planning" if planning_active else "info",
+    )
+    st.rerun()
 
 
 # Direkter Start zu Debug-Zwecken: `streamlit run map_linked.py`.

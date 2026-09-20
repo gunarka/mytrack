@@ -282,12 +282,28 @@ Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
 Der **Planungsmodus** lässt sich auch hier über den Schalter "📐 Planung"
 einschalten: Die Kennzahlen je Teil, die Punkteliste (mit "✕" zum Löschen)
 und der ZIP-Export stehen wie auf der Seite "Karte" links, die Trennpunkte
-erscheinen in Karte und Höhenprofil. **Neue Punkte per Klick setzen** geht
-dagegen nur auf der Seite "Karte": Das braucht Serverzustand, während die
-Komponente hier vollständig im Browser läuft und nichts an Streamlit
-zurückmeldet. Aus demselben Grund fehlt hier die Option "Position per
-Kartenklick" – Info-Punkte lassen sich aber über ihre Koordinatenfelder
-auch auf dieser Seite anlegen und ändern.
+erscheinen in Karte und Höhenprofil. **Neue Trennpunkte per Klick setzen**
+geht dagegen nur auf der Seite "Karte": Das braucht Serverzustand, den die
+Komponente hier normalerweise nicht an Streamlit zurückmelden kann.
+
+**Neue Info-Punkte** ("📍 Punkte zur Tour") lassen sich hier dagegen direkt
+auf der Karte anlegen:
+
+- **Rechtsklick** auf eine Stelle in der Karte öffnet ein schwebendes
+  Overlay **"📍 Punkt speichern?"** mit Feldern für Titel und Beschreibung.
+- "Speichern" legt den Punkt an genau dieser Stelle an – die Karte muss
+  dafür **nicht** auf einen Trackpunkt treffen, wie beim Formular auf der
+  Seite "Karte".
+- Das geht nur bei genau **einem** ausgewählten Track; bei mehreren zeigt
+  das Overlay stattdessen einen Hinweis, links in der Punkteliste zuerst
+  auf einen Track einzugrenzen.
+- Technisch verlässt sich das auf einen kleinen Rückkanal-Trick über die
+  Zusatzbibliothek `streamlit-javascript` (siehe CONTEXT.md) – dafür ist
+  am Verhalten der Seite selbst sonst nichts weiter zu beachten.
+- Das Formular mit den Koordinatenfeldern (Titel, Beschreibung, Breite,
+  Länge) bleibt links in der Punkteliste ebenfalls bestehen, z. B. um
+  bereits angelegte Punkte zu bearbeiten oder Koordinaten von Hand
+  einzutragen.
 
 **Statistik** (Seite "Statistik"):
 
