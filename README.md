@@ -246,16 +246,27 @@ Wasserstelle, Abzweig, Gefahrenstelle.
 
 ### Anzeigeeinstellungen
 
-Im Bereich "⚙️ Einstellungen" der Seitenleiste (zusammen mit der
-Navigation): Farb-Spalte für Karte und Höhenprofil, Breite der
-Kennzahlen-Spalte sowie die Höhe von Karte + Profil. Für die Höhe gibt es
-drei Modi:
+Im (standardmäßig eingeklappten) Bereich "⚙️ Einstellungen" der
+Seitenleiste (zusammen mit der Navigation): Farb-Spalte für Karte und
+Höhenprofil, **Profildarstellung** (welche Kennzahl das Höhenprofil auf
+der Y-Achse zeigt) sowie die Breite der Kennzahlen-Spalte.
 
-| Modus | Verhalten |
+**Profildarstellung** – Auswahl der Y-Achse des Höhenprofils:
+
+| Option | Zeigt |
 |---|---|
-| **Fenster füllen** (Standard) | Karte und Profil füllen zusammen die Fensterhöhe. Das Höhenprofil behält die eingestellte Pixelhöhe, die Karte bekommt den Rest bis zum unteren Fensterrand. Wirkt sofort beim ersten Laden und zieht beim Ändern der Fenstergröße live mit; die Kennzahlen-Spalte scrollt bei Bedarf in sich selbst, statt die Seite zu verlängern. |
-| **Fensterhöhe messen (JS)** | Liest die Fensterhöhe per JavaScript aus und rechnet daraus feste Pixelwerte. Braucht immer einen zusätzlichen Durchlauf und aktualisiert sich nach einer Größenänderung erst bei der nächsten Interaktion – nur noch als Ausweichweg gedacht. |
-| **Manuell (px)** | Feste Gesamthöhe per Schieberegler. |
+| **Höhe** (Standard) | Klassisches Höhenprofil (Meter über dem Meeresspiegel). |
+| **Geschwindigkeit** | Tempo je Punkt in km/h. |
+| **Zeit (gesamt - nicht in Bewegung)** | Kumulierte Zeit *in Bewegung* seit Trackstart, in Minuten – Pausen/Stillstand zählen nicht mit. |
+| **Gefälle** | Steigung/Gefälle je Punkt in %. |
+| **Nichts** | Profil ohne Y-Achsen-Kennzahl (flache Linie); nützlich, wenn nur die Distanz-Achse zum Klicken/Auswählen gebraucht wird. |
+
+Die Hover-Infos an jedem Punkt zeigen unabhängig von dieser Auswahl immer
+alle Kennzahlen (Distanz, Höhe, Tempo, Gefälle, vergangene Zeit).
+
+Die Höhe von Karte + Höhenprofil wird ohne eigene Einstellung automatisch
+per JavaScript aus der Fensterhöhe ermittelt und passt sich bei einer
+Nutzerinteraktion an eine geänderte Fenstergröße an.
 
 **Karte (Sync)** (Seite "Karte (Sync)"):
 
@@ -282,6 +293,9 @@ Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
 - Linie und Profilkurve sind nach derselben Farbskala eingefärbt wie auf
   der Seite "Karte" (Höhe, Geschwindigkeit, Gefälle); bei "Nichts"
   bekommt jeder Track eine eigene Farbe. Unten rechts liegt die Legende.
+- Die Y-Achse des Höhenprofils zeigt hier immer die **Höhe** – die
+  Profildarstellung-Auswahl (Geschwindigkeit/Zeit/Gefälle/Nichts) gibt es
+  aktuell nur auf der Seite "Karte".
 - In den Einstellungen lässt sich zusätzlich die Hintergrundkarte wählen
   (OpenTopoMap, OpenStreetMap, Carto Positron).
 

@@ -106,13 +106,10 @@ from functions import insert_track_note, load_track_files, load_track_notes, pro
 from map import (
     _keyed_container,
     _nearest_point_index,
-    _render_fill_css,
-    _render_height_settings,
     _render_kpis,
     _render_notes_panel,
     _render_planning_kpis,
     _resolve_map_profile_height,
-    _height_mode,
     render_no_selection_hint,
     render_planning_toggle,
     render_track_filters,
@@ -427,12 +424,10 @@ _UPLOT_CSS = (
 _HTML_TEMPLATE = """<style>
   __UPLOT_CSS__
   html, body { margin: 0; padding: 0; font-family: "Source Sans Pro", system-ui, sans-serif; }
-  /* Flex-Spalte über die volle iframe-Höhe: Im Höhen-Modus "fill" streckt
-     das CSS der Seite (map._FILL_CSS) den iframe auf den verbleibenden
-     Platz bis zum Fensterrand - die Karte wächst dann über "flex: 1"
-     einfach mit, ohne dass Python eine Pixelhöhe kennen müsste. In den
-     anderen Modi setzt boot() feste Pixelhöhen, die Flexbox ändert daran
-     nichts. */
+  /* Flex-Spalte über die volle iframe-Höhe: boot() setzt feste, aus der
+     Fensterhöhe berechnete Pixelhöhen (siehe map._resolve_map_profile_height);
+     die Flexbox sorgt nur dafür, dass Karte und Profil sich diese Höhe
+     wie vorgesehen aufteilen. */
   html, body, #wrap { height: 100%; }
   #wrap { position: relative; display: flex; flex-direction: column; }
   #map { flex: 1 1 auto; min-height: 0; }
@@ -1082,7 +1077,7 @@ def render_linked_map_page(settings_container=None) -> None:
     geschrieben.
     """
     if settings_container is None:
-        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
+        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=False)
 
     with settings_container:
         st.selectbox(
@@ -1105,13 +1100,9 @@ def render_linked_map_page(settings_container=None) -> None:
             key="kpi_col_width_pct",
             help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
         )
-        # Dieselbe Höhen-Einstellung wie auf der Seite "Karte" (gemeinsame
-        # Widget-Keys, siehe map._render_height_settings).
-        _render_height_settings()
-
-    # CSS des Füllmodus - vor dem Hauptbereich, damit die Komponente gleich
-    # beim ersten Rendern die richtige Höhe bekommt.
-    _render_fill_css()
+        # Höhe von Karte + Profil: keine eigene Einstellung mehr, wird wie
+        # auf der Seite "Karte" automatisch per JavaScript aus der
+        # Fensterhöhe ermittelt (siehe map._resolve_map_profile_height).
 
     # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
     # Punkt-Indizes) - dieselbe Ablage wie auf der Seite "Karte"; hier nur
@@ -1213,13 +1204,10 @@ def render_linked_map_page(settings_container=None) -> None:
                 profile_height,
                 split_points=st.session_state.split_points if planning_active else None,
                 notes=notes,
-                fill=_height_mode() == "fill",
             )
             # +48 px für die Werte-Leiste über der Karte (und ggf. den
             # Fehlerbalken); ohne Aufschlag schneidet der iframe das Profil
-            # unten ab. Im Füllmodus ist das nur der Startwert - der
-            # iframe wird anschließend per CSS auf die Fensterhöhe
-            # gestreckt (Container-Key 'mp_map', siehe map._FILL_CSS).
+            # unten ab.
             with _keyed_container("mp_map"):
                 _render_component(
                     _component_html(payload),

@@ -380,6 +380,19 @@ def process_gpx_dataframe(gpx_bytes: bytes) -> gpd.GeoDataFrame:
     gdf["distance"] = gdf["dist_delta"].cumsum()
     gdf["time_passed"] = gdf["time_delta"].cumsum()
 
+    # Kumulierte "Zeit in Bewegung" je Punkt (Gegenstück zu 'time_passed',
+    # das JEDE Sekunde seit Trackstart mitzählt - auch Pausen/Stillstand):
+    # Nur Zeitdifferenzen zu Punkten, an denen mindestens
+    # DEFAULT_MIN_SPEED_MOVING_KMH erreicht wurde, fließen ein. Wird für die
+    # Profil-Y-Achsen-Option "Zeit (gesamt - nicht in Bewegung)" gebraucht
+    # (siehe map._profile_y_series) - Pendant zur Track-weiten Kennzahl aus
+    # compute_moving_time_s(), hier aber als fortlaufende Reihe je Punkt statt
+    # als einzelner Summenwert.
+    moving_mask = gdf["km_per_h"].fillna(0) >= DEFAULT_MIN_SPEED_MOVING_KMH
+    gdf["time_moving_passed_s"] = (
+        gdf["time_delta"].dt.total_seconds().where(moving_mask, 0.0).cumsum()
+    )
+
     # Höhenänderung zum Vorgänger: in Auf- (positiv) und Abstieg (negativ)
     # aufgeteilt, damit beide Anteile später aufsummiert werden können.
     gdf["ele_delta"] = gdf["ele"] - shifted["ele"]

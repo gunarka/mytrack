@@ -136,7 +136,7 @@ with st.sidebar:
     # aufgerufen), damit alle genannten Elemente in genau demselben
     # auf-/zuklappbaren Bereich landen, auch wenn sie aus unterschiedlichen
     # Modulen/Funktionen heraus befüllt werden.
-    settings_expander = st.expander("⚙️ Einstellungen", expanded=True)
+    settings_expander = st.expander("⚙️ Einstellungen", expanded=False)
 
 # st.navigation deklariert die verfügbaren Seiten und übernimmt das Routing
 # (welche render_*_page()-Funktion beim Seitenwechsel läuft); mit

@@ -53,8 +53,8 @@ Aufbau der Seite:
    den zugehörigen Track angehängt. Angelegt/bearbeitet werden sie in der
    Kennzahlen-Spalte (siehe _render_notes_panel), die Position wahlweise
    per Kartenklick oder über die Koordinatenfelder.
-6. Höhe von Karte + Profil: drei Modi (Fenster füllen per CSS, Fensterhöhe
-   per JavaScript messen, fester Pixelwert) - siehe Abschnitt "Höhe von
+6. Höhe von Karte + Profil: wird ohne Auswahlmöglichkeit automatisch per
+   JavaScript aus der Fensterhöhe ermittelt - siehe Abschnitt "Höhe von
    Karte + Höhenprofil" weiter unten.
 
 Der Datenbankzugriff (load_metadata / load_track_files) liegt - wie aller
@@ -105,30 +105,15 @@ from functions import (
 # --------------------------------------------------------------------------
 # Höhe von Karte + Höhenprofil
 # --------------------------------------------------------------------------
-# Drei Modi, einstellbar in der Seitenleiste (siehe _render_height_settings):
-#
-#   "fill"   (Standard) - Karte und Profil füllen gemeinsam die Fensterhöhe.
-#            Umgesetzt rein über CSS (siehe _FILL_CSS): Der umgebende
-#            Container bekommt 'height: calc(100vh - ...)', das Profil
-#            behält seine Pixelhöhe, die Karte nimmt per Flexbox den Rest.
-#            Das ist der zuverlässige Weg, weil er OHNE Umweg über den
-#            Server funktioniert: sofort beim ersten Rendern, und beim
-#            Ändern der Fenstergröße zieht die Karte live mit (Leaflet und
-#            uPlot reagieren von sich aus auf die Größenänderung ihres
-#            iframes). Die an Python übergebenen Pixelhöhen sind in diesem
-#            Modus nur noch Startwerte für den iframe.
-#   "window" - alter Weg: die Fensterhöhe wird per JavaScript ausgelesen und
-#            als Pixelwert zurück an Python gegeben. Braucht immer einen
-#            zusätzlichen Rerun und aktualisiert sich nach einer
-#            Fenster-Größenänderung erst bei der nächsten Interaktion;
-#            bleibt als Ausweichweg erhalten.
-#   "manual" - feste Gesamthöhe per Schieberegler.
+# Die Höhe wird IMMER automatisch aus der Fensterhöhe ermittelt (per
+# JavaScript, siehe _resolve_map_profile_height) - keine Auswahl/Einstellung
+# mehr dafür in der Seitenleiste. Damit entfällt zwar die Möglichkeit, die
+# Höhe manuell zu fixieren, dafür bleibt die Einstellungen-Sektion schlanker
+# und es gibt nur noch genau ein Verhalten zu pflegen/testen.
 _DEFAULT_TOTAL_HEIGHT_PX = 1100
 _MAX_TOTAL_HEIGHT_PX = 2200
 _MIN_MAP_HEIGHT_PX = 300
 _MIN_PROFILE_HEIGHT_PX = 150
-# Höhe des Höhenprofils im Modus "fill" (die Karte bekommt den Rest).
-_DEFAULT_PROFILE_HEIGHT_PX = 300
 # Anteil des Höhenprofils an der Gesamthöhe, entspricht ungefähr dem
 # bisherigen festen Verhältnis 300/1100.
 _PROFILE_HEIGHT_RATIO = 300 / 1100
@@ -149,18 +134,12 @@ def _split_map_profile_height(total_height_px: int) -> tuple[int, int]:
     return map_height_px, profile_height_px
 
 
-def _height_mode() -> str:
-    """Aktuell gewählter Höhen-Modus ("fill" | "window" | "manual")."""
-    return st.session_state.get("map_profile_height_mode", "fill")
-
-
 def _keyed_container(key: str, border: bool = False):
     """
-    st.container() mit CSS-Klasse 'st-key-<key>' - darüber greifen die
-    Regeln aus _FILL_CSS gezielt auf genau diesen Container zu.
-
-    Der Rückfall ohne 'key' hält die Seite auf älteren Streamlit-Versionen
-    lauffähig (dann bleibt lediglich der Füllmodus wirkungslos).
+    st.container() mit CSS-Klasse 'st-key-<key>' - erlaubt es, einzelne
+    Container (Karte, Profil, Kennzahlen-Spalte) gezielt per CSS
+    anzusprechen. Aktuell ohne eigene Regeln genutzt; der Rückfall ohne
+    'key' hält die Seite auf älteren Streamlit-Versionen lauffähig.
     """
     try:
         return st.container(border=border, key=key)
@@ -168,97 +147,14 @@ def _keyed_container(key: str, border: bool = False):
         return st.container(border=border)
 
 
-# CSS des Modus "fill" (siehe oben). Bewusst eng auf die drei Container-Keys
-# begrenzt, damit keine andere Stelle der App davon erfasst wird:
-#   mp_box     - umgebender Rahmen: exakt fensterhoch, Inhalt als Flex-Spalte
-#   mp_map     - Karte: nimmt den verbleibenden Platz (flex: 1) und gibt ihn
-#                bis zum iframe durch (Streamlit schachtelt mehrere <div>)
-#   mp_profile - Höhenprofil: behält seine Pixelhöhe
-#   mp_kpis    - Kennzahlen-Spalte: scrollt bei Bedarf in sich selbst,
-#                statt die Seite länger als das Fenster zu machen
-_FILL_CSS = """
-<style>
-.st-key-mp_box { height: calc(100vh - 2rem); }
-.st-key-mp_box > div { height: 100%; }
-.st-key-mp_map { flex: 1 1 auto; min-height: 240px; }
-.st-key-mp_map > div,
-.st-key-mp_map [data-testid="stElementContainer"],
-.st-key-mp_map [data-testid="stElementContainer"] > div,
-.st-key-mp_map iframe { height: 100% !important; }
-.st-key-mp_profile { flex: 0 0 auto; }
-.st-key-mp_kpis { max-height: calc(100vh - 2rem); overflow-y: auto; }
-</style>
-"""
-
-
-def _render_fill_css() -> None:
-    """Gibt das CSS des Füllmodus aus - nur, wenn dieser aktiv ist."""
-    if _height_mode() == "fill":
-        st.markdown(_FILL_CSS, unsafe_allow_html=True)
-
-
-def _render_height_settings() -> None:
-    """
-    Zeichnet die Höhen-Einstellung (Modus + passender Schieberegler) in die
-    Seitenleiste. Von BEIDEN Kartenseiten genutzt, damit dort dieselben
-    Optionen mit denselben Widget-Keys stehen und die Einstellung den
-    Seitenwechsel übersteht.
-    """
-    labels = {
-        "fill": "Fenster füllen",
-        "window": "Fensterhöhe messen (JS)",
-        "manual": "Manuell (px)",
-    }
-    st.radio(
-        "Höhe Karte + Profil",
-        options=list(labels.keys()),
-        index=0,
-        key="map_profile_height_mode",
-        format_func=lambda x: labels[x],
-        help=(
-            "'Fenster füllen': Karte und Profil füllen die Fensterhöhe "
-            "vollständig aus und passen sich beim Ändern der Fenstergröße "
-            "sofort an (reines CSS, kein Neuladen). "
-            "'Fensterhöhe messen': ermittelt die Fensterhöhe per JavaScript "
-            "und rechnet daraus feste Pixelwerte - aktualisiert sich erst "
-            "beim nächsten Rerun. "
-            "'Manuell': feste Gesamthöhe."
-        ),
-    )
-    if _height_mode() == "fill":
-        st.slider(
-            "Höhe Höhenprofil (px)",
-            min_value=_MIN_PROFILE_HEIGHT_PX,
-            max_value=600,
-            step=10,
-            value=_DEFAULT_PROFILE_HEIGHT_PX,
-            key="map_profile_height_px",
-            help="Die Karte darüber bekommt den restlichen Platz bis zum Fensterrand.",
-        )
-    elif _height_mode() == "manual":
-        st.slider(
-            "Höhe Karte + Profil (px)",
-            min_value=_MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX,
-            max_value=_MAX_TOTAL_HEIGHT_PX,
-            step=100,
-            value=_DEFAULT_TOTAL_HEIGHT_PX,
-            key="map_profile_total_height_px",
-            help="Gesamthöhe von Karte und Höhenprofil zusammen, in Pixeln.",
-        )
-
-
 def _resolve_map_profile_height() -> tuple[int, int]:
     """
     Ermittelt die zu verwendende Höhe für Karte + Höhenprofil als
-    (map_height_px, profile_height_px) - je nach Modus 'fill', 'window'
-    oder 'manual' (siehe _render_height_settings).
+    (map_height_px, profile_height_px) - per JavaScript aus der
+    Browser-Fensterhöhe.
 
-    Im Modus "fill" sind diese Werte nur Startwerte: Die tatsächliche Höhe
-    bestimmt anschließend das CSS (_FILL_CSS). Das Höhenprofil behält
-    dabei genau den hier gelieferten Pixelwert.
-
-    Im Modus "window" wird per st_javascript() der Wert von
-    window.parent.innerHeight aus dem Browser geholt.
+    Dazu wird per st_javascript() der Wert von window.parent.innerHeight
+    aus dem Browser geholt.
 
     Wichtig: 'window.innerHeight' würde die Höhe des eigenen
     Komponenten-Iframes zurückliefern (die immer 0 ist), nicht die
@@ -276,24 +172,7 @@ def _resolve_map_profile_height() -> tuple[int, int]:
     Nach einer Browser-Fenster-Grössenänderung wird der Wert beim nächsten
     Rerun (z.B. durch eine Nutzerinteraktion) aktualisiert, da st_javascript
     die Auswertung bei jeder neuen Komponentenmontierung wiederholt.
-    Für eine regelmässige Aktualisierung kann der Schieberegler 'Höhe Karte
-    + Profil' auf 'Manuell' umgeschaltet werden.
     """
-    mode = _height_mode()
-
-    if mode == "fill":
-        profile_height_px = int(
-            st.session_state.get("map_profile_height_px", _DEFAULT_PROFILE_HEIGHT_PX)
-        )
-        # Startwert für die Karte: der Rest der Standardhöhe. Die
-        # endgültige Höhe setzt gleich das CSS (siehe _FILL_CSS).
-        map_height_px = max(_MIN_MAP_HEIGHT_PX, _DEFAULT_TOTAL_HEIGHT_PX - profile_height_px)
-        return map_height_px, profile_height_px
-
-    if mode == "manual":
-        total_height_px = st.session_state.get("map_profile_total_height_px", _DEFAULT_TOTAL_HEIGHT_PX)
-        return _split_map_profile_height(total_height_px)
-
     # window.parent.innerHeight = Höhe des Browser-Viewports (nicht des Iframes)
     window_height = st_javascript("window.parent.innerHeight", key="window_height_js")
     min_plausible = _MIN_MAP_HEIGHT_PX + _MIN_PROFILE_HEIGHT_PX + _WINDOW_HEIGHT_OFFSET_PX
@@ -797,23 +676,32 @@ def _render_best_efforts(gdf: pd.DataFrame) -> None:
 _NOTE_COLOR = "#1E88E5"
 
 
-def _note_position_on_track(gdf: pd.DataFrame, note: pd.Series) -> tuple[int, float, float]:
+def _note_position_on_track(
+    gdf: pd.DataFrame, note: pd.Series, y_column: str = "ele"
+) -> tuple[int, float, float]:
     """
-    Liefert zu einem Info-Punkt (index, distance_m, elevation_m) bezogen
-    auf das verarbeitete Track-DataFrame.
+    Liefert zu einem Info-Punkt (index, distance_m, y_value) bezogen auf
+    das verarbeitete Track-DataFrame - 'y_value' passend zur aktuellen
+    Profildarstellung (siehe PROFILE_Y_OPTIONS/_profile_y_value_at).
 
     Der gespeicherte 'point_index' zeigt auf den nächstgelegenen
     Trackpunkt; daraus ergibt sich die Stelle auf der x-Achse des
     Höhenprofils. Er wird defensiv in den gültigen Bereich geklemmt -
     wurde ein Track nach dem Anlegen des Punkts neu hochgeladen und ist
     dabei kürzer geworden, soll der Punkt trotzdem noch dargestellt
-    werden. Fehlt eine eigene Höhe, wird die des Trackpunkts verwendet,
-    damit der Punkt im Profil auf der Kurve liegt.
+    werden. Ein Info-Punkt speichert nur seine eigene Höhe (nicht Tempo/
+    Gefälle/Zeit) - zeigt das Profil gerade "Höhe" an und der Punkt hat
+    eine eigene Höhe hinterlegt, wird diese verwendet, sonst (bzw. bei
+    jeder anderen Profildarstellung) der Wert des nächstgelegenen
+    Trackpunkts, damit der Punkt auf der Kurve liegt.
     """
     idx = 0 if pd.isna(note["point_index"]) else int(note["point_index"])
     idx = max(0, min(idx, len(gdf) - 1))
-    elevation = float(note["ele"]) if pd.notna(note["ele"]) else float(gdf["ele"].iloc[idx])
-    return idx, float(gdf["distance"].iloc[idx]), elevation
+    if y_column == "ele" and pd.notna(note["ele"]):
+        y_value = float(note["ele"])
+    else:
+        y_value = _profile_y_value_at(gdf, idx, y_column)
+    return idx, float(gdf["distance"].iloc[idx]), y_value
 
 
 def _note_texts(note: pd.Series, distance_m: float) -> tuple[str, str]:
@@ -1284,6 +1172,83 @@ def _render_planning_kpis(
     )
 
 
+# --------------------------------------------------------------------------
+# Profildarstellung: welche Kennzahl das Höhenprofil auf der Y-Achse zeigt
+# --------------------------------------------------------------------------
+# Standardmäßig "Höhe" (klassisches Höhenprofil), umschaltbar in der
+# Seitenleiste (siehe render_map_page: Auswahl "profile_y_column"). Die
+# Hover-Texte (siehe _build_hover_texts) zeigen unabhängig davon immer ALLE
+# Kennzahlen - nur die Kurve/Fläche selbst sowie deren Skalierung wechseln.
+PROFILE_Y_OPTIONS = {
+    "ele": "Höhe",
+    "km_per_h": "Geschwindigkeit",
+    "time_moving": "Zeit (gesamt - nicht in Bewegung)",
+    "slope": "Gefälle",
+    "none": "Nichts",
+}
+# Achsentitel inkl. Einheit je Option - "none" bleibt ohne Titel.
+_PROFILE_Y_AXIS_TITLES = {
+    "ele": "Höhe (m)",
+    "km_per_h": "Geschwindigkeit (km/h)",
+    "time_moving": "Zeit in Bewegung (min)",
+    "slope": "Gefälle (%)",
+}
+
+
+def _profile_y_series(gdf: pd.DataFrame, y_column: str) -> pd.Series:
+    """
+    Liefert die Y-Werte des Höhenprofils für 'gdf' gemäß der gewählten
+    Profildarstellung (siehe PROFILE_Y_OPTIONS):
+
+        - "ele"/"km_per_h"/"slope": die jeweilige, bereits von
+          process_track() berechnete Spalte unverändert.
+        - "time_moving": die kumulierte Zeit IN BEWEGUNG je Punkt (siehe
+          functions.process_gpx_dataframe, Spalte 'time_moving_passed_s'),
+          in Minuten - Pendant zur Gesamtzeit 'time_passed', jedoch ohne
+          Stillstand/Pausen.
+        - "none": konstant 0 - das Profil wird dann als flache Linie ohne
+          Höhenangabe dargestellt (nur die x-Achse/Distanz bleibt relevant).
+    """
+    if y_column == "none":
+        return pd.Series(0.0, index=gdf.index)
+    if y_column == "time_moving":
+        return gdf["time_moving_passed_s"] / 60.0
+    return gdf[y_column]
+
+
+def _profile_y_value_at(gdf: pd.DataFrame, idx: int, y_column: str) -> float:
+    """Einzelner Y-Wert (siehe _profile_y_series) am Punkt-Index 'idx'."""
+    if y_column == "none":
+        return 0.0
+    if y_column == "time_moving":
+        return float(gdf["time_moving_passed_s"].iloc[idx]) / 60.0
+    return float(gdf[y_column].iloc[idx])
+
+
+def _profile_y_range(df: pd.DataFrame, y_column: str) -> list[float]:
+    """
+    Gesamter Wertebereich [min, max] der gewählten Profildarstellung über
+    ALLE ausgewählten Tracks - Basis für die feste Y-Achsen-Skalierung des
+    Profils (siehe fig.update_yaxes in _render_map_and_profile).
+
+    Für "ele"/"km_per_h"/"slope" stehen Minimum/Maximum bereits als
+    Kennzahlen je Track in 'df' (aus der Datenbank, siehe
+    functions.summarize_track). "time_moving" hat kein eigenes Minimum/
+    Maximum in der Datenbank - hier reicht der Bereich [0, größte
+    Gesamt-Bewegungszeit], da die kumulierte Kurve pro Track bei 0 beginnt.
+    "none" liefert einen kleinen Dummy-Bereich um die konstante 0-Linie.
+    """
+    if y_column == "ele":
+        return [df["elevation_min"].min(), df["elevation_max"].max()]
+    if y_column == "km_per_h":
+        return [df["speed_min"].min(), df["speed_max"].max()]
+    if y_column == "slope":
+        return [df["slope_min"].min(), df["slope_max"].max()]
+    if y_column == "time_moving":
+        return [0.0, df["track_time_moving_s"].max() / 60.0]
+    return [-1.0, 1.0]
+
+
 def _render_map_and_profile(
     df: pd.DataFrame,
     planning_mode: bool = False,
@@ -1312,8 +1277,7 @@ def _render_map_and_profile(
 
     'map_height'/'profile_height' (in Pixeln) bestimmen die Höhe der
     Folium-Karte bzw. des Plotly-Höhenprofils - von render_map_page() über
-    _resolve_map_profile_height() ermittelt (siehe dort). Im Höhen-Modus
-    "fill" sind es nur Startwerte, die endgültige Höhe macht das CSS.
+    _resolve_map_profile_height() ermittelt (siehe dort).
 
     Die Info-Punkte der ausgewählten Tracks werden hier selbst nachgeladen
     (gecacht, siehe functions.load_track_notes) und als blaue Marker auf
@@ -1331,12 +1295,14 @@ def _render_map_and_profile(
         [df["location_lat_max"].max(), df["location_lon_max"].max()],
     ]
 
-    range_elevation = [df["elevation_min"].min(), df["elevation_max"].max()]
-    # Rand ober-/unterhalb des Höhenprofils: fester Anteil der Höhendifferenz
-    # (nicht Faktor auf den Wert selbst - das bräche bei Höhen um 0 m bzw.
-    # unter dem Meeresspiegel).
-    ele_lo, ele_hi = range_elevation
-    ele_pad = max((ele_hi - ele_lo) * 0.1, 10)
+    # Profildarstellung: welche Kennzahl das Höhenprofil auf der Y-Achse
+    # zeigt (siehe PROFILE_Y_OPTIONS/_profile_y_range) - Standard "Höhe".
+    profile_y_column = st.session_state.get("profile_y_column", "ele")
+    y_lo, y_hi = _profile_y_range(df, profile_y_column)
+    # Rand ober-/unterhalb des Höhenprofils: fester Anteil der Wertespanne
+    # (nicht Faktor auf den Wert selbst - das bräche bei Werten um 0, z.B.
+    # Höhen um 0 m oder Gefälle-Abschnitten bergab).
+    y_pad = max((y_hi - y_lo) * 0.1, 1) if profile_y_column != "none" else 0.5
 
     # Je nach gewählter Farb-Spalte den passenden Wertebereich für die
     # Farbskala (vmin/vmax) auswählen; "none" (einfarbig) nutzt einen
@@ -1344,7 +1310,7 @@ def _render_map_and_profile(
     plot_column = st.session_state.plot_column
     range_att = {
         "km_per_h": [df["speed_min"].min(), df["speed_max"].max()],
-        "ele": range_elevation,
+        "ele": [df["elevation_min"].min(), df["elevation_max"].max()],
         "slope": [df["slope_min"].min(), df["slope_max"].max()],
     }.get(plot_column, [1, 1])
 
@@ -1480,10 +1446,12 @@ def _render_map_and_profile(
         # erst NACH der Schleife (siehe dort).
         track_notes = notes[notes["track_id"] == track_id] if not notes.empty else notes
         for _, note in track_notes.iterrows():
-            note_idx, note_distance, note_ele = _note_position_on_track(gdf, note)
+            note_idx, note_distance, note_y_value = _note_position_on_track(
+                gdf, note, y_column=profile_y_column
+            )
             popup_html, hover_html = _note_texts(note, note_distance)
             note_x.append(note_distance)
-            note_y.append(note_ele)
+            note_y.append(note_y_value)
             note_hover.append(hover_html)
             folium.Marker(
                 [float(note["lat"]), float(note["lon"])],
@@ -1614,17 +1582,22 @@ def _render_map_and_profile(
             if sel_idx not in track_splits:
                 marker_line_colors[sel_idx] = "black"
 
+        # Y-Werte gemäß gewählter Profildarstellung (Höhe/Tempo/Zeit in
+        # Bewegung/Gefälle/Nichts - siehe PROFILE_Y_OPTIONS).
+        y_values = _profile_y_series(gdf, profile_y_column)
+
         # Haupt-Trace: ein Punkt pro Trackpunkt, Farbe nach der gewählten
         # Spalte, mit Flächenfüllung bis zur x-Achse (Silhouette des
-        # Höhenprofils).
+        # Höhenprofils) - bei "Nichts" ohne Füllung, da die Fläche sonst
+        # nur die konstante 0-Linie nachzeichnen würde.
         # WICHTIG: Die curve_number dieser Trace (gerade Zahl: 0, 2, 4, ...)
         # wird weiter unten genutzt, um einen Klick im Profil wieder einem
         # konkreten Trackpunkt zuzuordnen.
         fig.add_trace(
             go.Scatter(
                 x=gdf["distance"],
-                y=gdf["ele"],
-                fill="tozeroy",
+                y=y_values,
+                fill="tozeroy" if profile_y_column != "none" else "none",
                 mode="markers",
                 marker=dict(
                     color=track_att,
@@ -1640,8 +1613,8 @@ def _render_map_and_profile(
                         (0.0, "rgba(120, 190, 170, 0.0)"),
                         (1.0, "rgba(120, 190, 170, 0.8)"),
                     ],
-                    start=ele_lo - ele_pad,
-                    stop=ele_hi + ele_pad,
+                    start=y_lo - y_pad,
+                    stop=y_hi + y_pad,
                 ),
                 # Hover zeigt dieselben Kennzahlen wie die Hover-Marker auf
                 # der Karte (siehe _build_hover_texts) - "<extra></extra>"
@@ -1666,7 +1639,7 @@ def _render_map_and_profile(
             go.Scatter(
                 mode="markers",
                 x=[gdf.at[0, "distance"], gdf.iloc[-1]["distance"]],
-                y=[gdf.at[0, "ele"], gdf.iloc[-1]["ele"]],
+                y=[y_values.iloc[0], y_values.iloc[-1]],
                 marker=dict(
                     color=["green", "red"],
                     size=15,
@@ -1708,8 +1681,13 @@ def _render_map_and_profile(
     # setzen (zuvor wurde er in der Schleife je Track überschrieben, sodass
     # am Ende nur der letzte Track passend skaliert war und die übrigen
     # Profile abgeschnitten wurden). Der Rand wird als fester Anteil der
-    # Höhendifferenz aufgeschlagen (siehe ele_pad oben).
-    fig.update_yaxes(range=[ele_lo - ele_pad, ele_hi + ele_pad])
+    # Wertespanne aufgeschlagen (siehe y_pad oben). Der Achsentitel nennt
+    # Kennzahl + Einheit der aktuellen Profildarstellung - bei "Nichts"
+    # bleibt er leer.
+    fig.update_yaxes(
+        range=[y_lo - y_pad, y_hi + y_pad],
+        title=_PROFILE_Y_AXIS_TITLES.get(profile_y_column, ""),
+    )
 
     # Ausgewählten Punkt zuletzt auf der Karte einzeichnen, damit er
     # garantiert über allen Track-Linien/-Markern liegt (Folium zeichnet
@@ -1779,9 +1757,6 @@ def _render_map_and_profile(
     # und deshalb nie remountete.)
     _track_sig = hashlib.md5(str(current_track_ids).encode()).hexdigest()[:8]
     _fmap_key = f"fmap_{_track_sig}_{map_height}"
-    # Eigener Container mit Key 'mp_map': Im Höhen-Modus "fill" greift
-    # darüber das CSS zu, das den Karten-iframe auf den verbleibenden
-    # Platz bis zum Fensterrand streckt (siehe _FILL_CSS).
     with _keyed_container("mp_map"):
         map_state = st_folium(m, width="stretch", height=map_height, key=_fmap_key)
 
@@ -1862,9 +1837,6 @@ def _render_map_and_profile(
     # on_select="rerun": ein Klick im Profil löst einen kompletten
     # Skript-Rerun aus; "event" enthält danach die Klick-Information
     # (welche Trace, welcher Punkt) für DIESEN Durchlauf.
-    # Eigener Container mit Key 'mp_profile' - Gegenstück zu 'mp_map':
-    # Das Profil behält im Füllmodus seine Pixelhöhe, die Karte darüber
-    # bekommt den Rest (siehe _FILL_CSS).
     with _keyed_container("mp_profile"):
         event = st.plotly_chart(
             fig, on_select="rerun", key="my_chart_key", height=profile_height
@@ -2124,7 +2096,7 @@ def render_map_page(settings_container=None) -> None:
     daher wird in diesem Fall ein eigener Expander angelegt.
     """
     if settings_container is None:
-        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=True)
+        settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=False)
 
     # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
     # Punkt-Indizes) zentral initialisieren: _render_planning_kpis() wird
@@ -2136,11 +2108,12 @@ def render_map_page(settings_container=None) -> None:
     # Aufklappbarer Seitenleisten-Bereich: Anzeigeeinstellungen
     # ----------------------------------------------------------------------
     # Enthält (zusammen mit der Navigation aus app.py): Farbauswahl für
-    # Karte/Höhenprofil, Spaltenbreite der Kennzahlen-Box sowie die Höhe von
-    # Karte + Höhenprofil (automatisch an die Fensterhöhe angepasst oder
-    # manuell per Schieberegler) - bewusst von den darunter folgenden
-    # Filtern (Sport/Land/Jahr/Jahreszeit, Track-Auswahl) getrennt, damit
-    # diese immer sofort sichtbar bleiben.
+    # Karte/Höhenprofil, Auswahl der Profildarstellung (Y-Achse des
+    # Höhenprofils) sowie Spaltenbreite der Kennzahlen-Box - bewusst von den
+    # darunter folgenden Filtern (Sport/Land/Jahr/Jahreszeit, Track-Auswahl)
+    # getrennt, damit diese immer sofort sichtbar bleiben. Die Höhe von
+    # Karte + Höhenprofil wird ohne eigene Einstellung automatisch aus der
+    # Fensterhöhe ermittelt (siehe _resolve_map_profile_height).
     with settings_container:
         color_options = {
             "ele": "Höhe",
@@ -2155,6 +2128,18 @@ def render_map_page(settings_container=None) -> None:
             format_func=lambda x: color_options[x],
         )
 
+        st.selectbox(
+            "Profildarstellung",
+            options=list(PROFILE_Y_OPTIONS.keys()),
+            key="profile_y_column",
+            format_func=lambda x: PROFILE_Y_OPTIONS[x],
+            help=(
+                "Kennzahl, die das Höhenprofil auf der Y-Achse zeigt. "
+                "Die Hover-Infos zu jedem Punkt zeigen unabhängig davon "
+                "immer alle Kennzahlen."
+            ),
+        )
+
         st.slider(
             "Spaltenbreite Kennzahlen",
             min_value=10,
@@ -2163,13 +2148,6 @@ def render_map_page(settings_container=None) -> None:
             key="kpi_col_width_pct",
             help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
         )
-
-        _render_height_settings()
-
-    # CSS des Füllmodus - muss vor dem Aufbau des Hauptbereichs im
-    # Dokument stehen, damit Karte und Profil gleich beim ersten Rendern
-    # in der richtigen Höhe erscheinen.
-    _render_fill_css()
 
     # ----------------------------------------------------------------------
     # Sidebar: Filter (Sport/Land/Jahr/Jahreszeit + Track-Baum)
@@ -2222,9 +2200,8 @@ def render_map_page(settings_container=None) -> None:
     kpi_width_pct = st.session_state.kpi_col_width_pct
     col_kpis, col_map = st.columns([kpi_width_pct, 100 - kpi_width_pct], gap="small")
 
-    # Höhe von Karte + Höhenprofil: automatisch aus der Fensterhöhe oder
-    # manuell per Schieberegler (siehe _resolve_map_profile_height sowie die
-    # zugehörige Auswahl im Anzeigeeinstellungen-Bereich der Seitenleiste).
+    # Höhe von Karte + Höhenprofil: automatisch aus der Fensterhöhe ermittelt
+    # (siehe _resolve_map_profile_height).
     map_height, profile_height = _resolve_map_profile_height()
 
     # Info-Punkte der ausgewählten Tracks: einmal hier geladen (gecacht)

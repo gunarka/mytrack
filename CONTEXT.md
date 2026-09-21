@@ -43,7 +43,9 @@ Schreibzugriffe gehören nach `functions.py` und werden von den Seiten nur
 aufgerufen. Jede Seite stellt genau eine `render_*_page()`-Funktion bereit;
 `app.py` registriert sie über `st.Page`/`st.navigation` (mit
 `position="hidden"`, die Menüpunkte werden per `st.page_link()` selbst in
-den Einstellungen-Expander gerendert).
+den Einstellungen-Expander gerendert, der standardmäßig **eingeklappt**
+ist - `expanded=False` in `app.py`/`map.py`/`map_linked.py`, alle drei
+Stellen teilen sich denselben Expander-Titel "⚙️ Einstellungen").
 
 `st.set_page_config()` muss der allererste Streamlit-Aufruf bleiben und
 steht deshalb in `app.py`, nicht in den Seitenmodulen.
@@ -128,19 +130,22 @@ führendem Unterstrich.
 - Filter/Auswahl Karte: `sport_select`, `country_select`, `year_select`,
   `season_select`, Checkboxen `track_select_<id>` /
   `tour_select_<jahr>_<id>` sowie `_tour_open_<jahr>_<id>` (auf-/zugeklappt)
-- Anzeige: `plot_column`, `kpi_col_width_pct`, `map_profile_height_mode`
-  (`fill`/`window`/`manual`), `map_profile_height_px` (Profilhöhe im
-  Füllmodus), `map_profile_total_height_px`, `window_height_js`
+- Anzeige: `plot_column`, `profile_y_column` (Y-Achse des Höhenprofils,
+  siehe `map.PROFILE_Y_OPTIONS`), `kpi_col_width_pct`, `window_height_js`
+  (Rückgabewert der JS-Fensterhöhen-Messung, siehe
+  `map._resolve_map_profile_height()` - keine eigene Auswahl/Einstellung
+  mehr für den Höhen-Modus)
 - Info-Punkte: `note_click_mode` (Kartenklick wählt Position),
   `_note_position` (vorgemerkte Koordinaten), `_last_note_map_click`
 - Karte/Profil: `selected_point`, `my_chart_key`
-- Karte (Sync): `lm_plot_column`, `lm_basemap` (Anzeigeeinstellungen
-  `kpi_col_width_pct`, `map_profile_height_mode`,
-  `map_profile_total_height_px` sowie alle Filter-Keys UND `planning_mode`/
+- Karte (Sync): `lm_plot_column`, `lm_basemap` (Anzeigeeinstellung
+  `kpi_col_width_pct` sowie alle Filter-Keys UND `planning_mode`/
   `split_points` werden mit der Seite "Karte" geteilt, damit Auswahl und
-  Planung beim Seitenwechsel stehen bleiben), `_lm_note_bridge_gen`
-  (Zähler für den `key` der `streamlit-javascript`-Rückkanal-Komponente,
-  siehe `map_linked._handle_note_bridge`)
+  Planung beim Seitenwechsel stehen bleiben; `profile_y_column` wirkt NUR
+  auf der Seite "Karte" - die Sync-Seite zeigt im Profil immer die Höhe),
+  `_lm_note_bridge_gen` (Zähler für den `key` der
+  `streamlit-javascript`-Rückkanal-Komponente, siehe
+  `map_linked._handle_note_bridge`)
 - Planung: `planning_mode`, `split_points`, `_last_planning_click`,
   `_last_planning_map_click`, `_last_track_ids`
 - Beenden: `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
@@ -179,7 +184,8 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Darstellung der Track-Auswahl | `_render_track_tree()` / `_render_tour_group()` in `map.py` |
 | Info-Punkte (Logik/Export) | `functions.py`, Abschnitt "Info-Punkte" |
 | Info-Punkte (Bedienung) | `_render_notes_panel()` in `map.py` (von beiden Karten genutzt) |
-| Höhe von Karte + Profil | `_render_height_settings()`, `_resolve_map_profile_height()` und `_FILL_CSS` in `map.py` |
+| Höhe von Karte + Profil | `_resolve_map_profile_height()` in `map.py` (automatisch per JS, keine Auswahl mehr) |
+| Profildarstellung (Y-Achse Höhenprofil) | `PROFILE_Y_OPTIONS`, `_profile_y_series()`/`_profile_y_range()`/`_profile_y_value_at()` in `map.py`; kumulierte Bewegungszeit je Punkt in `process_gpx_dataframe()` (`functions.py`, Spalte `time_moving_passed_s`) |
 | Planungs-Schalter | `render_planning_toggle()` in `map.py` (wirkt auf beide Karten) |
 | Interaktion Karte/Profil ohne Rerun | JS-Vorlage `_HTML_TEMPLATE` in `map_linked.py` |
 | Änderung am GPX-Parsing | `process_gpx_dataframe()` (pro Punkt) |
@@ -256,28 +262,55 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
 
 ## Höhe von Karte und Profil
 
-Drei Modi (`map_profile_height_mode`), gemeinsam gerendert von
-`map._render_height_settings()`:
+Keine Auswahl/Einstellung mehr dafür in der Seitenleiste - die Höhe wird
+IMMER automatisch ermittelt, über `map._resolve_map_profile_height()`:
+misst per `st_javascript` (`window.parent.innerHeight`) die Browser-
+Fensterhöhe und teilt sie über `_split_map_profile_height()` in Karten-
+und Profilhöhe auf (Mindesthöhen `_MIN_MAP_HEIGHT_PX`/
+`_MIN_PROFILE_HEIGHT_PX`, Obergrenze `_MAX_TOTAL_HEIGHT_PX`). Braucht je
+Messung einen Rerun und hinkt nach Größenänderungen bis zur nächsten
+Nutzerinteraktion hinterher - das ist bekannt und akzeptiert, dafür gibt es
+nur noch dieses eine Verhalten zu pflegen/testen (kein CSS-Füllmodus, kein
+manueller Schieberegler mehr).
 
-- **`fill` (Standard)** – reines CSS (`map._FILL_CSS`), eingehängt über
-  Container mit festem Key: `mp_box` (Rahmen, `height: calc(100vh - 2rem)`,
-  Inhalt als Flex-Spalte), `mp_map` (`flex: 1`, gibt die Höhe bis zum
-  iframe durch), `mp_profile` (behält seine Pixelhöhe) und `mp_kpis`
-  (scrollt in sich selbst). Leaflet und uPlot reagieren von sich aus auf
-  die Größenänderung ihres iframes, deshalb genügt das CSS – **ohne**
-  Server-Rerun, wirksam schon beim ersten Rendern. Auf der Seite
-  "Karte (Sync)" liegt zusätzlich in der HTML-Vorlage ein Flex-Layout;
-  `layout.fill` im Payload sagt der Komponente, dass sie der Karte KEINE
-  Pixelhöhe setzen soll.
-- **`window`** – der alte Weg über `st_javascript` (misst
-  `window.parent.innerHeight`). Braucht je Messung einen Rerun und hinkt
-  nach Größenänderungen hinterher; bleibt nur als Ausweichweg.
-- **`manual`** – fester Pixelwert.
-
-Die Container-Keys sind Teil der Schnittstelle zum CSS: Wer sie umbenennt,
-muss `_FILL_CSS` mitziehen. `_keyed_container()` fällt auf ein
+`_keyed_container()` in `map.py` vergibt weiterhin feste Keys (`mp_box`,
+`mp_map`, `mp_profile`, `mp_kpis`) für Karte/Profil/Kennzahlen-Container -
+aktuell ohne eigene CSS-Regeln, aber als Ansatzpunkt erhalten, falls
+künftig wieder gezielt CSS auf einzelne Bereiche wirken soll. Fällt auf ein
 schlüsselloses `st.container()` zurück, falls die Streamlit-Version `key`
-noch nicht kennt – dann ist lediglich der Füllmodus wirkungslos.
+noch nicht kennt.
+
+## Profildarstellung (Y-Achse des Höhenprofils)
+
+Auswahl in den Anzeigeeinstellungen (`profile_y_column`, Standard `"ele"`
+= Höhe), Optionen in `map.PROFILE_Y_OPTIONS`: Höhe, Geschwindigkeit,
+"Zeit (gesamt - nicht in Bewegung)", Gefälle, Nichts.
+
+- `map._profile_y_series(gdf, y_column)` liefert die Y-Werte der
+  Profil-Trace für einen Track; `_profile_y_value_at()` denselben Wert für
+  einen einzelnen Punkt-Index (u.a. für Info-Punkte, siehe
+  `_note_position_on_track(gdf, note, y_column=...)`).
+- `map._profile_y_range(df, y_column)` liefert den festen Wertebereich
+  über ALLE ausgewählten Tracks (für Achsen-Skalierung + Flächenfüllung).
+  Für "Höhe"/"Geschwindigkeit"/"Gefälle" stammt er aus den bereits in der
+  Datenbank gepflegten Min/Max-Kennzahlen je Track; für "Zeit in Bewegung"
+  aus `[0, max(track_time_moving_s)]` (die kumulierte Kurve jedes Tracks
+  beginnt bei 0); "Nichts" nutzt einen kleinen Dummy-Bereich um die
+  konstante 0-Linie.
+- Die kumulierte "Zeit in Bewegung" je Punkt (Spalte
+  `time_moving_passed_s`, Sekunden) wird in
+  `functions.process_gpx_dataframe()` berechnet: Zeitdifferenzen zu
+  Punkten unterhalb `DEFAULT_MIN_SPEED_MOVING_KMH` fließen mit 0 statt
+  ihrer tatsächlichen Dauer ein, bevor kumuliert wird - Pendant zur
+  Track-weiten Kennzahl aus `compute_moving_time_s()`, hier aber als
+  fortlaufende Reihe je Punkt statt als einzelner Summenwert.
+- Die Hover-Texte (`_build_hover_texts()`) zeigen UNABHÄNGIG von dieser
+  Auswahl immer alle Kennzahlen - nur Kurve/Füllung/Achsenskalierung des
+  Profils wechseln.
+- Gilt nur auf der Seite "Karte" (Plotly). Die Seite "Karte (Sync)"
+  (Leaflet + uPlot) zeigt im Profil weiterhin fest die Höhe - eine eigene
+  Umsetzung dort wäre eine separate JS-seitige Erweiterung der
+  `_HTML_TEMPLATE`/`_build_payload()`-Logik in `map_linked.py`.
 
 ## Fallstricke
 
