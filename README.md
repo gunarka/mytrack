@@ -18,23 +18,23 @@ Die App ist in sechs Python-Dateien aufgeteilt:
 | `functions.py`   | **Gemeinsame Logik.** Datenbankverbindung & -Schema, GPX-Verarbeitung mit GeoPandas, Reverse-Geocoding, Zeitzonen-Ermittlung, Bestzeiten-Auswertung, GPX-Export, alle CRUD-Funktionen (Create/Read/Update/Delete) für Tracks, Touren und Sportarten sowie die gecachten Leseabfragen von Karte und Statistik (`load_metadata`, `load_track_files`, `load_track_notes`, `load_heatmap_points`). Enthält keinerlei Oberflächen-Code. |
 | `stats.py`       | **Statistik-Seite** (Seite "Statistik"). Gesamtwerte, Kilometer je Jahr/Monat, Auswertung je Sportart sowie eine Heatmap aller aufgezeichneten Punkte. Rechnet fast ausschließlich mit den gespeicherten Kennzahlen, ohne die GPX-Dateien erneut zu verarbeiten. |
 | `admin.py`       | **Verwaltungsoberfläche** (Seite "Verwaltung"). Eigenständiger Export-Bereich ("⬇️ GPX-Export") oberhalb von drei Tabs (Tracks, Touren, Sportarten), die jeweils ein Formular zum Neuanlegen, ein Formular zum Bearbeiten/Löschen und eine Übersichtstabelle enthalten. |
-| `map.py`         | **Kartenansicht** (Seite "Karte"). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl (Touren eingeklappt), Folium-Karte mit eingefärbten Tracks, gemeinsames Höhenprofil (Plotly) mit Klick-Interaktion, die Info-Punkte sowie der Planungsmodus. |
-| `map_linked.py`  | **Karte mit Hover-Synchronisation** (Seite "Karte (Sync)"). Dieselben Filter, Kennzahlen und den Planungs-Schalter wie `map.py`, aber Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot). Dadurch reagieren beide ohne Server-Rerun aufeinander: Hover im Profil zeigt den Punkt auf der Karte und umgekehrt. |
+| `map_linked.py`  | **Kartenansicht** (Seite "Karte", Standardseite beim Start). Pills-Filter nach Sport/Land/Jahr/Jahreszeit, darunter eine aufklappbare Jahr -> Monat -> Tour -> Track-Auswahl (Touren eingeklappt), Karte und Höhenprofil in EINER Browser-Komponente (Leaflet + uPlot) mit beidseitiger Hover-Synchronisation, wählbaren Profil-Achsen und Einfärbung, die Info-Punkte sowie der Planungsmodus. |
+| `map.py`         | **Gemeinsame Bausteine der Kartenseite** (keine eigene Seite): Sidebar-Filter, Kennzahlen-Anzeige, Bestzeiten, Info-Punkte-Verwaltung, Planungsmodus-Kennzahlen/-Export sowie die Höhenermittlung für Karte/Profil - von `map_linked.py` importiert. |
 | `init.py`        | **Eigenständiges Werkzeug** zum (Neu-)Anlegen der Datenbankstruktur. Löscht beim Klick auf den Button alle vorhandenen Daten – bewusst getrennt von `app.py`, damit das nicht versehentlich im normalen Betrieb passiert. |
 
-`map.py`, `map_linked.py`, `stats.py` und `admin.py` stellen jeweils eine
-Funktion `render_map_page()`, `render_linked_map_page()`,
-`render_stats_page()` bzw. `render_admin_page()` bereit. `app.py` registriert diese über
+`map_linked.py`, `stats.py` und `admin.py` stellen jeweils eine Funktion
+`render_linked_map_page()`, `render_stats_page()` bzw. `render_admin_page()`
+bereit. `app.py` registriert diese über
 [`st.navigation`](https://docs.streamlit.io/develop/api-reference/navigation/st.navigation)
 als Seiten und kümmert sich um die gemeinsame Seitenleiste. Diese Dateien
 lassen sich zum Debuggen weiterhin auch einzeln starten
-(`streamlit run admin.py` / `streamlit run map.py` /
-`streamlit run map_linked.py` / `streamlit run stats.py`).
+(`streamlit run admin.py` / `streamlit run map_linked.py` /
+`streamlit run stats.py`); `map.py` ist keine eigene Seite und hat daher
+keinen eigenen Startmodus.
 
 Die Sidebar-Filter (Sport/Land/Jahr/Jahreszeit und die Track-Auswahl)
 liegen als `map.render_track_filters()` an einer Stelle und werden von
-beiden Kartenseiten genutzt – beide verwenden dieselben Widget-Keys, die
-Auswahl bleibt beim Wechsel zwischen ihnen also erhalten.
+`map_linked.py` genutzt, statt sie dort zu duplizieren.
 
 Die Datenbankverbindung (`functions.get_connection()`) ist über
 `st.cache_resource` als Singleton implementiert: Alle Module im selben
@@ -85,8 +85,7 @@ nötig (es würde alle Daten löschen).
 
 ## Installation & Start
 
-Benötigt Python 3.10+ und Streamlit 1.49 oder neuer (für `width="stretch"`
-sowie `height=` bei `st.plotly_chart`).
+Benötigt Python 3.10+ und Streamlit 1.49 oder neuer (für `width="stretch"`).
 
 ```bash
 pip install -r requirements.txt
@@ -158,7 +157,17 @@ hochladen.
    GPX-Datei, bei mehreren ein ZIP-Archiv mit je einer Datei pro Track
    bzw. Tour. Punkte (Info-Punkte) werden dabei immer mit exportiert.
 
-**Karte** (Seite "Karte"):
+**Karte** (Seite "Karte", Standardseite beim Start):
+
+Karte und Höhenprofil liegen in EINER Browser-Komponente (Leaflet + uPlot)
+und synchronisieren sich gegenseitig ohne Serverkontakt: Hover über dem
+Profil bewegt einen Marker auf der Karte mit, Hover über der Karte bewegt
+den Cursor im Profil mit; eine gemeinsame Werte-Leiste (Track, km, Höhe,
+Tempo, Steigung, Zeit) zeigt dabei immer alle Kennzahlen des Punkts unter
+dem Mauszeiger, unabhängig von der gewählten Achsendarstellung (siehe
+unten). Zoom im Profil (Ziehen mit der Maus) zoomt die Karte auf denselben
+Abschnitt; ein Klick im Profil zentriert die Karte auf den Punkt; die
+Schaltfläche "Alles zeigen" setzt beides zurück.
 
 In der Seitenleiste zunächst optional über die Pills nach Sport, Land,
 Jahr und/oder Jahreszeit filtern (kaskadierend: jede Stufe zeigt nur noch
@@ -177,8 +186,10 @@ einsortiert unter dem Monat ihrer ersten Etappe – auch wenn sie über
 einen Monatswechsel läuft. Es muss mindestens ein Track ausgewählt sein –
 solange keiner gewählt ist, weisen Seitenleiste und Hauptbereich darauf hin;
 die Seitenleiste (inklusive **"🚪 Beenden"**) bleibt dabei voll bedienbar.
-Zusätzlich kann oben eine Farb-Spalte für das Höhenprofil gewählt werden
-(Höhe, Geschwindigkeit, Gefälle oder einfarbig).
+
+In den Anzeigeeinstellungen (siehe unten) lassen sich X-/Y-Achse des
+Höhenprofils, die Einfärbung von Linie und Profilkurve sowie die
+Hintergrundkarte wählen.
 
 Links neben der Karte zeigt ein Kennzahlen-Bereich Länge, Zeit, Zeit in
 Bewegung, Pause, Ø-Tempo, Ø-Tempo in Bewegung, Auf-/Abstieg sowie
@@ -195,26 +206,21 @@ mit Tempo und der Kilometerstelle, an der er beginnt. Grundlage ist die
 ohnehin berechnete kumulierte Distanz, es ist also keine zusätzliche
 Geo-Berechnung nötig.
 
-Ein Klick auf einen Punkt im Höhenprofil zentriert die Karte auf den
-entsprechenden Ort.
-
-**Planung** (Schalter "📐 Planung" in der Seitenleiste, auf **beiden**
-Kartenseiten vorhanden):
+**Planung** (Schalter "📐 Planung" in der Seitenleiste):
 
 Ist genau **ein** Track ausgewählt, lässt sich der Planungsmodus
-einschalten. Darin wird der Track per Mausklick – auf die Karte oder ins
-Höhenprofil – in Teile unterteilt:
+einschalten. Er zeigt den Track in Teile unterteilt:
 
-- Ein Klick setzt einen Unterteilungspunkt (auf der Karte wird der
-  nächstgelegene Trackpunkt verwendet), ein erneuter Klick auf denselben
-  Punkt entfernt ihn wieder; alternativ über das "✕" in der Punkteliste.
 - Die Kennzahlen-Box zeigt statt der Werte je Track die Werte je Teil.
 - "📦 Export" lädt eine ZIP-Datei: je eine GPX-Datei pro Teil (mitsamt den
   Info-Punkten des jeweiligen Abschnitts), eine GPX-Datei mit den
   Trennpunkten und eine mit allen Info-Punkten als Wegpunkte.
-- Die gesetzten Punkte erscheinen orange und nummeriert auf Karte und
-  Höhenprofil – auch auf der Seite "Karte (Sync)" (dort nur zur Anzeige,
-  siehe unten).
+- Bereits gesetzte Punkte erscheinen orange und nummeriert auf Karte und
+  Höhenprofil und lassen sich über das "✕" in der Punkteliste wieder
+  löschen. **Neue Punkte lassen sich in der aktuellen Oberfläche nicht per
+  Klick setzen** – dafür bräuchte es einen Rückkanal von der Karte/dem
+  Profil nach Streamlit, den es (anders als beim Anlegen eines Info-Punkts
+  per Rechtsklick, siehe unten) hierfür noch nicht gibt.
 
 Wird ein zweiter Track dazu ausgewählt, schaltet sich der Modus
 automatisch wieder ab.
@@ -229,17 +235,17 @@ Wasserstelle, Abzweig, Gefahrenstelle.
   Planungsmodus) und müssen **nicht auf dem Track liegen** – die Hütte
   steht selten genau auf der Spur.
 - Angelegt werden sie bei genau **einem** ausgewählten Track, sowohl im
-  normalen Betrieb als auch im Planungsmodus, über "➕ Punkt hinzufügen"
-  (Titel, Beschreibung, Koordinaten).
-- Die Position lässt sich direkt eingeben oder – mit der Checkbox
-  **"Position per Kartenklick"** – per Klick auf die Karte übernehmen;
-  die vorgemerkte Stelle erscheint solange als grauer Marker. Im
-  Planungsmodus hat diese Einstellung Vorrang: Der Kartenklick setzt dann
-  keinen Trennpunkt mehr, das geht währenddessen über das Höhenprofil.
-- Angezeigt werden sie immer und auf beiden Kartenseiten: als blauer
-  Marker auf der Karte (Titel und Text im Popup) und als blaue Raute im
-  Höhenprofil, an der Kilometer-Stelle des nächstgelegenen Trackpunkts.
-- Jeder Punkt lässt sich über sein Aufklapp-Feld ändern oder löschen.
+  normalen Betrieb als auch im Planungsmodus – entweder über
+  **Rechtsklick auf die Karte** (öffnet ein Overlay "📍 Punkt speichern?"
+  mit Titel/Beschreibung; die Koordinaten des Klicks werden dabei
+  übernommen) oder über "➕ Punkt hinzufügen" in der Kennzahlen-Spalte
+  (Titel, Beschreibung, Koordinaten manuell eingeben).
+- Angezeigt werden sie immer: als blauer Marker auf der Karte (Titel und
+  Text im Popup) und als blaue Raute im Höhenprofil, an der Stelle des
+  nächstgelegenen Trackpunkts auf der jeweils gewählten X-/Y-Achse (siehe
+  Anzeigeeinstellungen unten).
+- Jeder Punkt lässt sich über sein Aufklapp-Feld in der Kennzahlen-Spalte
+  ändern oder löschen.
 - **Export:** Sie hängen als Wegpunkte (`<wpt>`) an jedem Export des
   zugehörigen Tracks – "⬇️ GPX herunterladen" in der Verwaltung, "Tour als
   GPX exportieren" sowie dem ZIP des Planungsmodus.
@@ -247,73 +253,58 @@ Wasserstelle, Abzweig, Gefahrenstelle.
 ### Anzeigeeinstellungen
 
 Im (standardmäßig eingeklappten) Bereich "⚙️ Einstellungen" der
-Seitenleiste (zusammen mit der Navigation): Farb-Spalte für Karte und
-Höhenprofil, **Profildarstellung** (welche Kennzahl das Höhenprofil auf
-der Y-Achse zeigt) sowie die Breite der Kennzahlen-Spalte.
+Seitenleiste (zusammen mit der Navigation): X-/Y-Achse des Höhenprofils,
+Einfärbung von Linie und Profilkurve, Hintergrundkarte sowie die Breite
+der Kennzahlen-Spalte.
 
-**Profildarstellung** – Auswahl der Y-Achse des Höhenprofils:
+**X-Achse** – Größe auf der waagerechten Achse des Höhenprofils, läuft bei
+mehreren ausgewählten Tracks über alle hinweg stetig weiter (die Tracks
+erscheinen im gemeinsamen Profil hintereinander statt sich zu
+überlagern):
 
 | Option | Zeigt |
 |---|---|
-| **Höhe** (Standard) | Klassisches Höhenprofil (Meter über dem Meeresspiegel). |
-| **Geschwindigkeit** | Tempo je Punkt in km/h. |
-| **Zeit (gesamt - nicht in Bewegung)** | Kumulierte Zeit *in Bewegung* seit Trackstart, in Minuten – Pausen/Stillstand zählen nicht mit. |
-| **Gefälle** | Steigung/Gefälle je Punkt in %. |
-| **Nichts** | Profil ohne Y-Achsen-Kennzahl (flache Linie); nützlich, wenn nur die Distanz-Achse zum Klicken/Auswählen gebraucht wird. |
+| **Entfernung** (Standard) | Kumulierte Distanz seit Beginn der Auswahl, in km. |
+| **Zeit** | Kumulierte Zeit seit Beginn der Auswahl, in Minuten – inklusive Pausen/Stillstand. |
+| **Zeit in Bewegung** | Wie "Zeit", aber ohne Pausen/Stillstand (Zeitdifferenzen unterhalb der Bewegungs-Schwelle zählen nicht mit). |
+| **Track Punkt #** | Fortlaufende Nummer des Trackpunkts. |
 
-Die Hover-Infos an jedem Punkt zeigen unabhängig von dieser Auswahl immer
-alle Kennzahlen (Distanz, Höhe, Tempo, Gefälle, vergangene Zeit).
+**Y-Achse** – Größe auf der senkrechten Achse des Höhenprofils:
+
+| Option | Zeigt |
+|---|---|
+| **Höhe** (Standard) | Meter über dem Meeresspiegel. |
+| **Geschwindigkeit** | Tempo je Punkt in km/h. |
+| **Gefälle** | Steigung/Gefälle je Punkt in %. |
+
+**Einfärbung** – Farbe von Track-Linie UND Profilkurve, unabhängig von
+X-/Y-Achse wählbar: Höhe, Geschwindigkeit, Gefälle oder Nichts (dann
+bekommt jeder Track stattdessen seine eigene Farbe; Legende unten rechts
+im Profil).
+
+Start ("S", grün), Ende ("Z", rot), Info-Punkte ("i", blau) und – im
+Planungsmodus – die Trennpunkte (orange, nummeriert) erscheinen jeweils an
+derselben X-/Y-Stelle auf Karte UND Höhenprofil, mit senkrechter
+Hilfslinie im Profil. Die Werte-Leiste über der Karte zeigt beim Hover
+unabhängig von der Achsenwahl immer ALLE Kennzahlen (Track, km, Höhe,
+Tempo, Steigung, Zeit).
+
+Zusätzlich lässt sich die **Hintergrundkarte** wählen (OpenTopoMap,
+OpenStreetMap, Carto Positron). Tritt im Browser ein Fehler auf (Bibliothek
+nicht ladbar, Kachelserver nicht erreichbar), erscheint dazu ein roter
+Hinweis oben in der Komponente – statt einer wortlos leeren Karte.
 
 Die Höhe von Karte + Höhenprofil wird ohne eigene Einstellung automatisch
 per JavaScript aus der Fensterhöhe ermittelt und passt sich bei einer
 Nutzerinteraktion an eine geänderte Fenstergröße an.
 
-**Karte (Sync)** (Seite "Karte (Sync)"):
-
-Dieselbe Track-Auswahl wie auf der Seite "Karte", aber Karte und
-Höhenprofil arbeiten hier direkt zusammen – ohne Nachladen:
-
-- **Maus über dem Höhenprofil** → ein roter Marker wandert auf der Karte
-  an die passende Stelle.
-- **Maus über der Karte** → das Fadenkreuz im Profil springt auf den
-  nächstgelegenen Trackpunkt.
-- Eine Leiste über der Karte zeigt zum jeweiligen Punkt Track, Kilometer,
-  Höhe, Tempo, Steigung und die vergangene Zeit.
-- **Im Profil ziehen** zoomt auf einen Abschnitt; die Karte zoomt
-  automatisch auf genau diesen Abschnitt mit. "Alles zeigen" (oben rechts
-  im Profil) setzt beides zurück.
-- **Klick ins Profil** zentriert die Karte auf den Punkt.
-- **Marker im Höhenprofil:** Start ("S", grün), Ende ("Z", rot), die
-  Info-Punkte ("i", blau) und – im Planungsmodus – die Trennpunkte
-  (orange, nummeriert), jeweils mit senkrechter Hilfslinie. Dieselben
-  Punkte liegen an derselben Stelle auf der Karte.
-- Tritt im Browser ein Fehler auf (Bibliothek nicht ladbar, Kachelserver
-  nicht erreichbar), erscheint dazu ein roter Hinweis oben in der
-  Komponente – statt einer wortlos leeren Karte.
-- Linie und Profilkurve sind nach derselben Farbskala eingefärbt wie auf
-  der Seite "Karte" (Höhe, Geschwindigkeit, Gefälle); bei "Nichts"
-  bekommt jeder Track eine eigene Farbe. Unten rechts liegt die Legende.
-- Die Y-Achse des Höhenprofils zeigt hier immer die **Höhe** – die
-  Profildarstellung-Auswahl (Geschwindigkeit/Zeit/Gefälle/Nichts) gibt es
-  aktuell nur auf der Seite "Karte".
-- In den Einstellungen lässt sich zusätzlich die Hintergrundkarte wählen
-  (OpenTopoMap, OpenStreetMap, Carto Positron).
-
-Der **Planungsmodus** lässt sich auch hier über den Schalter "📐 Planung"
-einschalten: Die Kennzahlen je Teil, die Punkteliste (mit "✕" zum Löschen)
-und der ZIP-Export stehen wie auf der Seite "Karte" links, die Trennpunkte
-erscheinen in Karte und Höhenprofil. **Neue Trennpunkte per Klick setzen**
-geht dagegen nur auf der Seite "Karte": Das braucht Serverzustand, den die
-Komponente hier normalerweise nicht an Streamlit zurückmelden kann.
-
-**Neue Info-Punkte** ("📍 Punkte zur Tour") lassen sich hier dagegen direkt
-auf der Karte anlegen:
+**Neue Info-Punkte** ("📍 Punkte zur Tour") lassen sich direkt auf der
+Karte anlegen:
 
 - **Rechtsklick** auf eine Stelle in der Karte öffnet ein schwebendes
   Overlay **"📍 Punkt speichern?"** mit Feldern für Titel und Beschreibung.
 - "Speichern" legt den Punkt an genau dieser Stelle an – die Karte muss
-  dafür **nicht** auf einen Trackpunkt treffen, wie beim Formular auf der
-  Seite "Karte".
+  dafür **nicht** auf einen Trackpunkt treffen.
 - Das geht nur bei genau **einem** ausgewählten Track; bei mehreren zeigt
   das Overlay stattdessen einen Hinweis, links in der Punkteliste zuerst
   auf einen Track einzugrenzen.
@@ -393,19 +384,24 @@ Glättung über 15 Punkte 596 m.
   exportiert). Dateien ohne Trackpunkte (reine Wegpunkt- oder
   Routen-Dateien) werden mit einer Meldung abgewiesen, statt die Seite
   mit einem Fehler abbrechen zu lassen.
-- Die Seite "Karte (Sync)" lädt Leaflet und uPlot von einem CDN und
+- Die Kartenseite lädt Leaflet und uPlot von einem CDN und
   benötigt dafür eine Internetverbindung. Je Bibliothek sind zwei CDNs
   hinterlegt (unpkg, jsDelivr); ist keines erreichbar, erscheint eine
   Meldung in der Komponente statt einer leeren Fläche. Für den
   Offline-Betrieb lassen sich die Dateien lokal ablegen und die Konstanten
   `_CDN_*` in `map_linked.py` anpassen.
-- Sehr große Auswahlen werden auf der Seite "Karte (Sync)" für die
+- Sehr große Auswahlen werden für die
   Darstellung ausgedünnt (höchstens 12.000 Punkte insgesamt, siehe
   `_MAX_TOTAL_POINTS`); ein Hinweis unter der Karte weist darauf hin. Die
   Kennzahlen werden davon nicht berührt.
-- Jeder Streamlit-Rerun (z.B. ein geänderter Filter) baut die Komponente
-  der Seite "Karte (Sync)" neu auf – Kartenausschnitt und Profil-Zoom
-  beginnen dann wieder bei der Gesamtansicht.
+- Jeder Streamlit-Rerun (z.B. ein geänderter Filter oder eine geänderte
+  Achsen-/Farbauswahl) baut die Kartenkomponente neu auf – Kartenausschnitt
+  und Profil-Zoom beginnen dann wieder bei der Gesamtansicht.
 - Kennzahlen aus Zeit und Tempo setzen Zeitstempel in der GPX-Datei
   voraus. Fehlen sie, bleiben Dauer, Tempo und "Zeit in Bewegung" leer;
   Distanz und Höhenwerte werden trotzdem berechnet.
+- Im Planungsmodus lassen sich Unterteilungspunkte aktuell **nicht** per
+  Klick setzen (siehe Abschnitt "Karte" oben) – nur anzeigen, löschen und
+  exportieren. Das war eine Klick-Interaktion einer früheren,
+  eigenständigen Karten-/Profilseite auf Basis von Folium/Plotly, die zu
+  Gunsten der synchronisierten Leaflet/uPlot-Komponente entfernt wurde.

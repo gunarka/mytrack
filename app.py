@@ -10,14 +10,14 @@ Dies ist die einzige Datei, mit der die App regulär gestartet wird:
 Sie übernimmt drei Aufgaben:
     1. Grundkonfiguration der Seite (Titel, Icon, breites Layout) - muss
        als allererster Streamlit-Befehl im gesamten Programm ausgeführt
-       werden, daher steht sie hier statt in map.py/admin.py.
+       werden, daher steht sie hier statt in map_linked.py/admin.py.
     2. Titel und Beschreibung in der Seitenleiste, sichtbar auf jeder Seite.
-    3. Seitenleisten-Navigation, über die zwischen "Karte" (map.py),
-       "Karte (Sync)" (map_linked.py), "Statistik" (stats.py) und
-       "Verwaltung" (admin.py) gewechselt werden kann - zusammen mit den
-       Anzeigeeinstellungen der Kartenseite (Farbauswahl, Spaltenbreite,
-       Höhe von Karte/Profil) in einem gemeinsamen, einklappbaren Bereich
-       der Seitenleiste (siehe 'settings_expander' weiter unten).
+    3. Seitenleisten-Navigation, über die zwischen "Karte" (map_linked.py,
+       Standardseite), "Statistik" (stats.py) und "Verwaltung" (admin.py)
+       gewechselt werden kann - zusammen mit den Anzeigeeinstellungen der
+       Kartenseite (Farbauswahl, Achsenwahl, Spaltenbreite) in einem
+       gemeinsamen, einklappbaren Bereich der Seitenleiste (siehe
+       'settings_expander' weiter unten).
     4. "Beenden"-Knopf am unteren Rand der Seitenleiste: trennt die
        Datenbankverbindung und beendet den Streamlit-Prozess im Terminal
        (siehe functions.shutdown_app()). Er wird auf JEDER Seite und in
@@ -29,12 +29,14 @@ nur per `return` abbrechen, niemals per `st.stop()`. `st.stop()` beendet
 den gesamten Skriptdurchlauf, sodass der erst danach gerenderte
 "Beenden"-Knopf verschwinden würde (siehe map.render_track_filters()).
 
-map.py, stats.py und admin.py enthalten dazu jeweils eine
-render_*_page()-Funktion
-mit dem kompletten Seiteninhalt; app.py registriert diese Funktionen nur
-noch als Streamlit-"Pages" und ruft die ausgewählte Seite auf. Die
-eigentliche fachliche Logik (Datenbank, GPX-Verarbeitung, Geocoding) liegt
-gebündelt in functions.py.
+map_linked.py, stats.py und admin.py enthalten dazu jeweils eine
+render_*_page()-Funktion mit dem kompletten Seiteninhalt; app.py
+registriert diese Funktionen nur noch als Streamlit-"Pages" und ruft die
+ausgewählte Seite auf. Die eigentliche fachliche Logik (Datenbank,
+GPX-Verarbeitung, Geocoding) liegt gebündelt in functions.py; map.py
+selbst ist keine eigene Seite mehr, sondern eine von map_linked.py
+genutzte Bibliothek gemeinsamer Bausteine (Filter, Kennzahlen,
+Info-Punkte, Planungsmodus - siehe dortiger Modul-Docstring).
 """
 
 import functools
@@ -43,7 +45,6 @@ import streamlit as st
 
 from admin import render_admin_page
 from functions import shutdown_app
-from map import render_map_page
 from map_linked import render_linked_map_page
 from stats import render_stats_page
 
@@ -55,8 +56,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Globales CSS-Styling - gilt auf beiden Seiten (Karte/Verwaltung), da dieser
-# Block vor der Navigation ausgeführt wird:
+# Globales CSS-Styling - gilt auf allen Seiten (Karte/Statistik/Verwaltung),
+# da dieser Block vor der Navigation ausgeführt wird:
 #
 #   .stAppHeader          — obere App-Leiste komplett entfernen (kein leerer
 #                           Streifen am oberen Rand des Hauptinhalts).
@@ -124,14 +125,14 @@ with st.sidebar:
     st.divider()
 
     # Gemeinsamer, einklappbarer Seitenleisten-Bereich für:
-    #   - die Seiten-Navigation (Karte/Verwaltung, siehe weiter unten -
-    #     st.navigation() selbst wird dafür mit position="hidden" *nicht*
-    #     dargestellt, stattdessen bauen wir die Menüpunkte manuell per
-    #     st.page_link() hier hinein),
+    #   - die Seiten-Navigation (Karte/Statistik/Verwaltung, siehe weiter
+    #     unten - st.navigation() selbst wird dafür mit position="hidden"
+    #     *nicht* dargestellt, stattdessen bauen wir die Menüpunkte manuell
+    #     per st.page_link() hier hinein),
     #   - sowie (nur auf der Kartenseite) die Anzeigeeinstellungen Farbe,
-    #     Spaltenbreite und Höhe von Karte/Profil (werden von
-    #     render_map_page() über das Argument 'settings_container'
-    #     hineingerendert, siehe map.py).
+    #     Achsenwahl und Spaltenbreite (werden von render_linked_map_page()
+    #     über das Argument 'settings_container' hineingerendert, siehe
+    #     map_linked.py).
     # Als EIN Container-Objekt angelegt (statt zweimal mit demselben Label
     # aufgerufen), damit alle genannten Elemente in genau demselben
     # auf-/zuklappbaren Bereich landen, auch wenn sie aus unterschiedlichen
@@ -144,24 +145,19 @@ with st.sidebar:
 # Seitenleiste gezeichnet - das übernehmen wir stattdessen selbst weiter
 # unten per st.page_link(), damit es im selben einklappbaren Bereich wie
 # die Anzeigeeinstellungen landet (siehe 'settings_expander' oben).
-# functools.partial reicht 'settings_expander' an render_map_page() durch,
-# ohne dass st.navigation()/st.Page() etwas davon wissen müssen - beide
-# erwarten weiterhin nur eine ohne Argumente aufrufbare Funktion.
+# functools.partial reicht 'settings_expander' an render_linked_map_page()
+# durch, ohne dass st.navigation()/st.Page() etwas davon wissen müssen -
+# beide erwarten weiterhin nur eine ohne Argumente aufrufbare Funktion.
 # default=True legt fest, welche Seite beim ersten Aufruf der App gezeigt
-# wird.
+# wird - "Karte" (vormals "Karte (Sync)"; die frühere, separate
+# Folium/Plotly-Seite "Karte" wurde entfernt, siehe map.py-Modul-Docstring).
 pages = [
     st.Page(
-        functools.partial(render_map_page, settings_container=settings_expander),
+        functools.partial(render_linked_map_page, settings_container=settings_expander),
         title="Karte",
         icon="🗺️",
         url_path="karte",
         default=True,
-    ),
-    st.Page(
-        functools.partial(render_linked_map_page, settings_container=settings_expander),
-        title="Karte (Sync)",
-        icon="🧭",
-        url_path="karte-sync",
     ),
     st.Page(
         render_stats_page,
@@ -217,9 +213,10 @@ navigation.run()
 # Damit er dabei IMMER sichtbar bleibt, dürfen die Seitenmodule den
 # Skriptdurchlauf nicht per st.stop() abbrechen (siehe Modul-Docstring):
 # Fehlt z.B. auf der Kartenseite eine Track-Auswahl, verlässt nur
-# render_map_page() sich selbst per return - dieser Block läuft weiter.
-# Der Klick beendet die App sofort (ohne Rückfrage): Ein Rerun setzt nur
-# das Flag, das beim nächsten Durchlauf oben die Abschiedsseite auslöst.
+# render_linked_map_page() sich selbst per return - dieser Block läuft
+# weiter. Der Klick beendet die App sofort (ohne Rückfrage): Ein Rerun
+# setzt nur das Flag, das beim nächsten Durchlauf oben die Abschiedsseite
+# auslöst.
 with st.sidebar:
     st.divider()
     if st.button(

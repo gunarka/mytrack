@@ -1,6 +1,6 @@
 # Web-UI
 # streamlit >= 1.49: width="stretch" (loest das abgekuendigte
-# use_container_width ab) sowie height= bei st.plotly_chart.
+# use_container_width ab).
 streamlit>=1.49
 streamlit_folium>=0.24
 streamlit-javascript
@@ -18,7 +18,6 @@ pyogrio
 geopy
 timezonefinder
 
-# Karte & Diagramme
+# Karte (Heatmap auf der Statistik-Seite, siehe stats.py; die Kartenseite
+# "Karte" selbst laedt Leaflet/uPlot per CDN im Browser, siehe map_linked.py)
 folium>=0.16
-branca
-plotly>=5.23

@@ -1,21 +1,19 @@
 """
 map_linked.py
 =============
-Seite "Karte (Sync)" - Karte und Höhenprofil in EINER Browser-Komponente,
-mit beidseitiger Hover-Synchronisation.
+Seite "Karte" - Karte und Höhenprofil in EINER Browser-Komponente, mit
+beidseitiger Hover-Synchronisation. Standardseite der App (siehe app.py).
 
-Warum eine zweite Kartenseite?
-------------------------------
-Die bestehende Seite "Karte" (map.py) besteht aus zwei getrennten
-Streamlit-Elementen: einer Folium-Karte (eigener iframe) und einem
-Plotly-Höhenprofil. Beide können nur über einen Server-Rerun miteinander
-reden - `st_folium` meldet ausschließlich Klicks/Viewport, `st.plotly_chart`
-ausschließlich `on_select`. Ein Rerun dauert je nach Trackgröße 100-500 ms;
-für eine Hover-Kopplung ("Maus über dem Profil -> Punkt auf der Karte")
-bräuchte es aber < 16 ms.
-
-Diese Seite löst das, indem Karte UND Profil in derselben JavaScript-
-Laufzeit liegen:
+Hintergrund
+-----------
+Eine Karte (Leaflet, eigener iframe) und ein separates Höhenprofil
+(Plotly, eigenes Streamlit-Element) können nur über einen Server-Rerun
+miteinander reden - `st_folium` meldet ausschließlich Klicks/Viewport,
+`st.plotly_chart` ausschließlich `on_select`. Ein Rerun dauert je nach
+Trackgröße 100-500 ms; für eine Hover-Kopplung ("Maus über dem Profil ->
+Punkt auf der Karte") bräuchte es aber < 16 ms. Genau das bot eine frühere,
+inzwischen entfernte Folium/Plotly-Kartenseite nicht - diese Seite löst
+das, indem Karte UND Profil in derselben JavaScript-Laufzeit liegen:
 
     Leaflet  (Karte, Canvas-Renderer, Raster-Kacheln von OpenTopoMap/OSM)
     uPlot    (Höhenprofil, Canvas, sehr schnell bei vielen Punkten)
@@ -24,13 +22,14 @@ Warum Leaflet und nicht MapLibre GL? MapLibre braucht WebGL UND einen Web
 Worker (jede GeoJSON-Quelle wird dort geparst). Im Streamlit-iframe kam der
 Basiskarten-Layer durch, die Track-Linien aber nicht - ein Fehlerbild, das
 genau auf diese Zusatzanforderungen zeigt. Leaflet rendert alles im
-Hauptthread auf ein Canvas, braucht weder WebGL noch Worker und ist in
-dieser App über Folium bereits erprobt.
+Hauptthread auf ein Canvas und braucht weder WebGL noch Worker.
 
 Beides wird über `st.components.v1.html()` als ein einziger iframe
 eingebettet. Streamlit liefert dabei nur einmal die Daten (JSON im HTML),
 alle Interaktionen laufen danach vollständig im Browser ab - ohne Rerun,
-ohne Server.
+ohne Server. EIN Streamlit-Rerun findet trotzdem statt, sobald sich eine
+Anzeigeeinstellung (Achsenwahl, Einfärbung, Basiskarte, Track-Auswahl, ...)
+ändert - die Komponente wird dann mit neuem JSON komplett neu aufgebaut.
 
 Funktionsumfang
 ---------------
@@ -39,16 +38,19 @@ Funktionsumfang
                               (nächstgelegener Trackpunkt, Gitter-Index).
 3. Gemeinsame Werte-Anzeige (Track, km, Höhe, Tempo, Steigung, Zeit) in
    einer Leiste über der Karte.
-4. Einfärbung von Linie UND Profilkurve nach Höhe/Tempo/Gefälle über
-   dieselbe Farbskala wie auf der Folium-Seite (blau -> rot), inkl.
-   Farblegende. Bei "Nichts" bekommt jeder Track eine eigene Farbe.
+4. X-/Y-Achse des Höhenprofils sowie die Einfärbung von Linie UND
+   Profilkurve sind in den Anzeigeeinstellungen wählbar (siehe
+   _AXIS_X_OPTIONS/_AXIS_Y_OPTIONS/_COLOR_OPTIONS sowie
+   render_linked_map_page) - inkl. Farblegende bei aktiver Einfärbung.
+   Bei "Nichts" bekommt jeder Track eine eigene Farbe.
 5. Zoom im Profil (Ziehen mit der Maus) zoomt die Karte auf denselben
    Abschnitt; Doppelklick bzw. die Schaltfläche "Alles zeigen" setzt
    beides zurück.
 6. Klick ins Profil zentriert die Karte auf den Punkt.
 7. Start (S, grün), Ende (Z, rot) und - im Planungsmodus - die gesetzten
    Unterteilungspunkte (orange, nummeriert) erscheinen sowohl auf der Karte
-   als auch im Höhenprofil, jeweils an derselben Kilometerstelle.
+   als auch im Höhenprofil, jeweils an derselben Stelle der gewählten
+   X-Achse.
 8. Rechtsklick auf die Karte öffnet ein schwebendes Overlay "📍 Punkt
    speichern?" (Titel + Beschreibung); ist genau ein Track ausgewählt,
    legt "Speichern" dort einen neuen Info-Punkt an der angeklickten
@@ -66,11 +68,11 @@ Bewusste Einschränkungen
   Component) lauscht im selben übergeordneten Fenster auf diese Nachricht
   und liefert sie an Python zurück (siehe `_handle_note_bridge` weiter
   unten). Unterteilungspunkte gehen diesen Weg bewusst NICHT mit - sie
-  lassen sich hier weiterhin nur ANZEIGEN; gesetzt und gelöscht werden sie
-  auf der Seite "Karte" (map.py) bzw. über die Punkteliste in der
-  Kennzahlen-Spalte. Der Schalter "📐 Planung" und die Kennzahlen je Teil
-  sind dagegen auf beiden Seiten vorhanden (siehe
-  map.render_planning_toggle).
+  lassen sich hier nur ANZEIGEN, LÖSCHEN (siehe map._render_planning_kpis)
+  und exportieren; NEU SETZEN lassen sie sich in der aktuellen Oberfläche
+  nicht mehr (das war eine Klick-Interaktion der früheren, entfernten
+  Folium/Plotly-Kartenseite). Der Schalter "📐 Planung" und die Kennzahlen
+  je Teil sind unverändert vorhanden (siehe map.render_planning_toggle).
 - Die JS-Bibliotheken werden von einem CDN geladen (siehe _CDN_*), es wird
   also eine Internetverbindung benötigt. Je Bibliothek sind zwei CDNs
   hinterlegt; schlägt das erste fehl, wird das zweite versucht. Klappt
@@ -89,9 +91,10 @@ Aufbau der Datei
 - _component_html()     JSON + HTML/JS-Vorlage -> fertiges Dokument
 - render_linked_map_page()  Seitenaufbau (Einstellungen, Filter, Kennzahlen)
 
-Fachlogik (DB, GPX) liegt weiterhin ausschließlich in functions.py; die
-Sidebar-Filter und die Kennzahlen-Anzeige werden aus map.py
-wiederverwendet, damit beide Kartenseiten identisch filtern.
+Fachlogik (DB, GPX) liegt weiterhin ausschließlich in functions.py; Filter,
+Kennzahlen-Anzeige, Info-Punkte-Verwaltung und Planungsmodus-Kennzahlen
+werden aus map.py wiederverwendet (siehe dortiger Modul-Docstring) statt
+hier dupliziert zu werden.
 """
 
 import json
@@ -106,6 +109,7 @@ from functions import insert_track_note, load_track_files, load_track_notes, pro
 from map import (
     _keyed_container,
     _nearest_point_index,
+    _render_best_efforts,
     _render_kpis,
     _render_notes_panel,
     _render_planning_kpis,
@@ -192,6 +196,30 @@ _COLOR_OPTIONS = {
     "none": ("Nichts", ""),
 }
 
+# --------------------------------------------------------------------------
+# Achsen des Höhenprofils (X + Y), unabhängig von der Einfärbung wählbar.
+# --------------------------------------------------------------------------
+# Schlüssel = Wert des jeweiligen Auswahl-Widgets (session_state
+# 'lm_axis_x'/'lm_axis_y'); Wert = (Anzeigename, Einheit). Die Reihenfolge
+# bestimmt zugleich die Reihenfolge im Dropdown UND die Vorbelegung (erster
+# Eintrag = Default, da die Selectboxen ohne 'index' aufgerufen werden).
+_AXIS_X_OPTIONS = {
+    "distance": ("Entfernung", "km"),
+    "time": ("Zeit", "min"),
+    "time_moving": ("Zeit in Bewegung", "min"),
+    "point_index": ("Track Punkt #", ""),
+}
+_AXIS_Y_OPTIONS = {
+    "ele": ("Höhe", "m"),
+    "km_per_h": ("Geschwindigkeit", "km/h"),
+    "slope": ("Gefälle", "%"),
+}
+# Bildet die Achsen-Auswahl auf den jeweiligen Feldnamen je Punkt in der an
+# die Komponente übertragenen Track-Struktur ab (siehe _build_payload) -
+# X-Achse: "km"/"tmin"/"tmovmin"/"pt"; Y-Achse: "ele"/"spd"/"slope".
+_AXIS_X_FIELDS = {"distance": "km", "time": "tmin", "time_moving": "tmovmin", "point_index": "pt"}
+_AXIS_Y_FIELDS = {"ele": "ele", "km_per_h": "spd", "slope": "slope"}
+
 
 def _clean(values, decimals: int) -> list:
     """
@@ -209,6 +237,8 @@ def _clean(values, decimals: int) -> list:
 def _build_payload(
     df: pd.DataFrame,
     plot_column: str,
+    axis_x: str,
+    axis_y: str,
     basemap_key: str,
     map_height: int,
     profile_height: int,
@@ -219,22 +249,36 @@ def _build_payload(
     """
     Baut die komplette Datenstruktur für die Browser-Komponente auf.
 
-    Je Track werden die Punkt-Arrays (lat, lon, Höhe, Tempo, Gefälle,
-    kumulierte Distanz, vergangene Zeit) übertragen. Die Distanz läuft -
-    wie im Plotly-Profil der Folium-Seite - über alle Tracks hinweg weiter,
-    damit mehrere Tracks im gemeinsamen Profil hintereinander erscheinen
-    statt sich zu überlagern.
+    Je Track werden die Punkt-Arrays übertragen: Position (lat, lon),
+    Höhe, Tempo, Gefälle sowie - für die X-Achsen-Auswahl des Profils
+    (siehe _AXIS_X_OPTIONS) - kumulierte Distanz ('km'), kumulierte Zeit
+    ('tmin'), kumulierte Zeit IN BEWEGUNG ('tmovmin') und ein fortlaufender
+    Punktzähler ('pt'). Alle vier X-Kandidaten laufen - wie zuvor nur die
+    Distanz - über ALLE ausgewählten Tracks hinweg stetig weiter, damit
+    mehrere Tracks im gemeinsamen Profil hintereinander erscheinen statt
+    sich zu überlagern (siehe distance_offset/time_offset/... unten).
+    Welches der vier Arrays tatsächlich als X-Achse dient (und welches der
+    Höhe/Tempo/Gefälle-Arrays als Y-Achse), entscheidet 'axis_x'/'axis_y' -
+    die Komponente selbst wählt dafür nur noch das passende Feld aus (siehe
+    _AXIS_X_FIELDS/_AXIS_Y_FIELDS und 'D.axis' im JS-Teil), OHNE dass base
+    Python mehrfach dieselben Daten in unterschiedlicher Anordnung schicken
+    müsste.
 
     Zusätzlich enthält die Struktur den Wertebereich der Farbskala (aus den
     gespeicherten Kennzahlen, nicht aus den ausgedünnten Punkten - so bleibt
     die Einfärbung unabhängig von der Ausdünnung), die Bounding-Box aller
-    Tracks sowie die Anzeige-Einstellungen.
+    Tracks sowie die Anzeige-Einstellungen. Die Einfärbung (Höhe/Tempo/
+    Gefälle/Nichts) ist bewusst UNABHÄNGIG von der Y-Achsen-Auswahl - man
+    kann z.B. die Y-Achse auf "Gefälle" stellen und trotzdem nach "Höhe"
+    einfärben.
 
     'notes' sind die Info-Punkte der Tracks (siehe
     functions.load_track_notes). Sie werden je Track mit ihrer eigenen
-    Position (sie müssen nicht auf dem Track liegen) und der Kilometer-
-    Stelle ihres nächstgelegenen Trackpunkts übertragen; die Komponente
-    zeichnet sie als blaue Marker auf Karte und Höhenprofil.
+    Position (sie müssen nicht auf dem Track liegen) sowie dem Wert an
+    jeder der vier X- und drei Y-Achsen-Kandidaten ihres nächstgelegenen
+    Trackpunkts übertragen; die Komponente zeichnet sie als blaue Marker
+    auf Karte und Höhenprofil, Letzteres an der Stelle der jeweils
+    AKTUELLEN Achsenwahl.
 
     'fill' meldet den Höhen-Modus "Fenster füllen" an die Komponente: Sie
     lässt die Karte dann über die Flexbox mitwachsen, statt ihr eine feste
@@ -260,10 +304,39 @@ def _build_payload(
 
     tracks = []
     distance_offset = 0.0
+    time_offset = 0.0
+    time_moving_offset = 0.0
+    point_offset = 0
     for pos, (track_id, title, gdf) in enumerate(frames):
         # Fortlaufende Gesamtdistanz über alle Tracks (in km für die x-Achse).
         cum_m = gdf["dist_delta"].cumsum().to_numpy() + distance_offset
         distance_offset = float(cum_m[-1]) if len(cum_m) else distance_offset
+
+        # Fortlaufende Gesamtzeit über alle Tracks (in Minuten) - Pendant zu
+        # 'cum_m' oben, für die X-Achsen-Option "Zeit".
+        time_passed = gdf["time_passed"]
+        seconds_since_track_start = (
+            time_passed.dt.total_seconds().to_numpy()
+            if pd.api.types.is_timedelta64_dtype(time_passed)
+            else np.full(len(gdf), np.nan)
+        )
+        cum_t_min = seconds_since_track_start / 60.0 + time_offset
+        if len(cum_t_min) and np.isfinite(cum_t_min[-1]):
+            time_offset = float(cum_t_min[-1])
+
+        # Fortlaufende Zeit IN BEWEGUNG über alle Tracks (in Minuten) -
+        # X-Achsen-Option "Zeit in Bewegung" (siehe
+        # functions.process_gpx_dataframe, Spalte 'time_moving_passed_s').
+        cum_tmov_min = gdf["time_moving_passed_s"].to_numpy() / 60.0 + time_moving_offset
+        if len(cum_tmov_min):
+            time_moving_offset = float(cum_tmov_min[-1])
+
+        # Fortlaufender Punktzähler über alle Tracks - X-Achsen-Option
+        # "Track Punkt #". Zählt die Punkte des UNGEDÜNNTEN Tracks, damit
+        # die Ausdünnung weiter unten (idx/stride) die Zählung nicht
+        # verfälscht.
+        pt_idx = np.arange(len(gdf)) + point_offset
+        point_offset += len(gdf)
 
         # Gleichmäßig ausdünnen, Start- und Endpunkt immer behalten.
         idx = list(range(0, len(gdf), stride))
@@ -307,15 +380,28 @@ def _build_payload(
             for _, note in own.iterrows():
                 raw_idx = 0 if pd.isna(note["point_index"]) else int(note["point_index"])
                 raw_idx = max(0, min(raw_idx, len(gdf) - 1))
+                note_t_min = cum_t_min[raw_idx]
                 track_notes.append({
                     "lat": round(float(note["lat"]), 6),
                     "lon": round(float(note["lon"]), 6),
+                    # X-Achsen-Kandidaten (siehe _AXIS_X_FIELDS) an der
+                    # Stelle des nächstgelegenen Trackpunkts.
                     "km": round(float(cum_m[raw_idx]) / 1000.0, 4),
+                    "tmin": round(float(note_t_min), 2) if np.isfinite(note_t_min) else None,
+                    "tmovmin": round(float(cum_tmov_min[raw_idx]), 2),
+                    "pt": int(pt_idx[raw_idx]),
+                    # Y-Achsen-Kandidaten (siehe _AXIS_Y_FIELDS). 'ele'
+                    # nutzt bevorzugt die eigene, gespeicherte Höhe des
+                    # Info-Punkts (er darf neben dem Track liegen); Tempo
+                    # und Gefälle hat ein Info-Punkt nicht selbst - dafür
+                    # immer der Wert des nächstgelegenen Trackpunkts.
                     "ele": (
                         round(float(note["ele"]), 1)
                         if pd.notna(note["ele"])
                         else round(float(gdf["ele"].iloc[raw_idx]), 1)
                     ),
+                    "spd": round(float(gdf["km_per_h"].iloc[raw_idx]), 2),
+                    "slope": round(float(gdf["slope"].iloc[raw_idx]), 1),
                     "title": str(note["note_title"] or "Punkt"),
                     "text": "" if pd.isna(note["note_text"]) else str(note["note_text"]),
                 })
@@ -333,17 +419,27 @@ def _build_payload(
             "color": _TRACK_COLORS[pos % len(_TRACK_COLORS)],
             "lat": _clean(sub["lat"], 6),
             "lon": _clean(sub["lon"], 6),
+            # Y-Achsen-Kandidaten (siehe _AXIS_Y_FIELDS).
             "ele": _clean(sub["ele"], 1),
             "spd": _clean(sub["km_per_h"], 2),
             "slope": _clean(sub["slope"], 1),
+            # X-Achsen-Kandidaten (siehe _AXIS_X_FIELDS) - alle vier stetig
+            # über sämtliche ausgewählten Tracks hinweg (s.o.).
             "km": _clean(cum_m[idx] / 1000.0, 4),
+            "tmin": _clean(cum_t_min[idx], 2),
+            "tmovmin": _clean(cum_tmov_min[idx], 2),
+            "pt": [int(v) for v in pt_idx[idx]],
+            # 'sec' bleibt für die Hover-Werteleiste erhalten (zeigt IMMER
+            # die vergangene Zeit an, unabhängig von der X-Achsen-Wahl -
+            # siehe showPoint() im JS-Teil).
             "sec": _clean(seconds, 0),
             "splits": splits,
             "notes": track_notes,
         })
 
-    # Wertebereich der Farbskala aus den gespeicherten Kennzahlen (identisch
-    # zur Folium-Seite), damit dieselben Farben dieselben Werte bedeuten.
+    # Wertebereich der Farbskala aus den gespeicherten Kennzahlen (nicht aus
+    # den ausgedünnten Punkten), damit dieselben Farben dieselben Werte
+    # bedeuten - unabhängig von Ausdünnung und aktueller Y-Achsen-Wahl.
     color_range = {
         "ele": [df["elevation_min"].min(), df["elevation_max"].max()],
         "km_per_h": [df["speed_min"].min(), df["speed_max"].max()],
@@ -369,9 +465,20 @@ def _build_payload(
     if not all(np.isfinite(v) for pair in bounds for v in pair):
         bounds = [[min(lons), min(lats)], [max(lons), max(lats)]]
 
+    axis_x_label, axis_x_unit = _AXIS_X_OPTIONS.get(axis_x, ("", ""))
+    axis_y_label, axis_y_unit = _AXIS_Y_OPTIONS.get(axis_y, ("", ""))
+
     return {
         "tracks": tracks,
         "bounds": bounds,
+        "axis": {
+            "x": _AXIS_X_FIELDS.get(axis_x, "km"),
+            "xLabel": axis_x_label,
+            "xUnit": axis_x_unit,
+            "y": _AXIS_Y_FIELDS.get(axis_y, "ele"),
+            "yLabel": axis_y_label,
+            "yUnit": axis_y_unit,
+        },
         "color": {
             "column": plot_column,
             "label": label,
@@ -571,6 +678,15 @@ document.getElementById("profile").style.height = PROFH + "px";
 
 if (!T.length) { showError("Keine Trackpunkte übertragen."); return; }
 
+/* Welches Datenfeld je Punkt aktuell als X- bzw. Y-Achse des Höhenprofils
+   dient (siehe map_linked._AXIS_X_FIELDS/_AXIS_Y_FIELDS - "km"/"tmin"/
+   "tmovmin"/"pt" bzw. "ele"/"spd"/"slope"). Alle vier X- und alle drei
+   Y-Kandidaten werden für JEDEN Punkt übertragen (s.o.), hier wird nur
+   noch das passende Feld ausgewählt - dadurch bleibt der gesamte Rest
+   dieses Skripts (Gradient, Marker, Zoom-Sync, ...) unabhängig von der
+   tatsächlichen Achsenwahl. */
+const XKEY = D.axis.x, YKEY = D.axis.y;
+
 /* ---------------------------------------------------------------------
    2. Flache Indizes: Alle Tracks werden zu EINER Punktfolge verkettet.
       owner[g] = Track-Nummer, local[g] = Punkt-Nummer innerhalb des Tracks.
@@ -578,7 +694,7 @@ if (!T.length) { showError("Keine Trackpunkte übertragen."); return; }
       abbilden und umgekehrt.
    --------------------------------------------------------------------- */
 let N = 0;
-T.forEach(t => N += t.km.length);
+T.forEach(t => N += t[XKEY].length);
 const owner = new Int32Array(N), local = new Int32Array(N);
 const XS = new Float64Array(N), LAT = new Float64Array(N), LON = new Float64Array(N);
 const offset = [];
@@ -586,9 +702,9 @@ const offset = [];
   let g = 0;
   T.forEach((t, ti) => {
     offset.push(g);
-    for (let i = 0; i < t.km.length; i++, g++) {
+    for (let i = 0; i < t[XKEY].length; i++, g++) {
       owner[g] = ti; local[g] = i;
-      XS[g] = t.km[i]; LAT[g] = t.lat[i]; LON[g] = t.lon[i];
+      XS[g] = t[XKEY][i]; LAT[g] = t.lat[i]; LON[g] = t.lon[i];
     }
   });
 }
@@ -675,23 +791,25 @@ T.forEach(t => {
       weight: 4, opacity: 0.95, renderer: renderer, interactive: false,
     }).addTo(map);
   }
-  /* Start-/Endpunkt wie auf der Folium-Seite (grün/rot). */
+  /* Start-/Endpunkt (grün/rot). */
   L.circleMarker([t.lat[0], t.lon[0]], { radius: 7, weight: 2, color: "#fff",
     fillColor: "#00a000", fillOpacity: 1, renderer: renderer })
     .bindTooltip("Start: " + esc(t.title)).addTo(map);
   L.circleMarker([t.lat[n - 1], t.lon[n - 1]], { radius: 7, weight: 2, color: "#fff",
     fillColor: "#d00000", fillOpacity: 1, renderer: renderer })
     .bindTooltip("Ende: " + esc(t.title)).addTo(map);
-  /* Unterteilungspunkte des Planungsmodus (orange, wie auf der Seite
-     "Karte"). Gesetzt werden sie dort - hier werden sie nur angezeigt. */
+  /* Unterteilungspunkte des Planungsmodus (orange). Gesetzt werden sie
+     aktuell nicht per Klick, nur über die Kennzahlen-Spalte gelöscht
+     (siehe map._render_planning_kpis) - hier werden sie nur angezeigt. */
   (t.splits || []).forEach(s => {
     L.circleMarker([t.lat[s.i], t.lon[s.i]], { radius: 8, weight: 2, color: "#fff",
       fillColor: "#ff8c00", fillOpacity: 1, renderer: renderer })
       .bindTooltip("Trennpunkt " + s.n + ": " + (t.km[s.i] || 0).toFixed(2) + " km").addTo(map);
   });
   /* Info-Punkte (blau): eigene Koordinaten, können neben dem Track liegen.
-     Angelegt und bearbeitet werden sie auf der Seite "Karte"; hier werden
-     sie - wie die Trennpunkte - nur angezeigt. */
+     Angelegt/bearbeitet werden sie über die Kennzahlen-Spalte (siehe
+     map._render_notes_panel) oder per Rechtsklick auf die Karte; hier
+     werden sie - wie die Trennpunkte - nur angezeigt. */
   (t.notes || []).forEach(nt => {
     L.circleMarker([nt.lat, nt.lon], { radius: 8, weight: 2, color: "#fff",
       fillColor: "#1E88E5", fillOpacity: 1, renderer: renderer })
@@ -742,14 +860,17 @@ function nearest(lat, lon) {
 }
 
 /* ---------------------------------------------------------------------
-   6. Höhenprofil (uPlot). Eine gemeinsame x-Achse (km über alle Tracks),
-      je Track eine Serie - außerhalb des eigenen Abschnitts mit null
-      gefüllt, damit die Kurven nicht ineinander laufen.
+   6. Höhenprofil (uPlot). Eine gemeinsame x-Achse (die gewählte X-Größe,
+      siehe XKEY oben, über alle Tracks hinweg stetig), je Track eine
+      Serie mit der gewählten Y-Größe (YKEY) - außerhalb des eigenen
+      Abschnitts mit null gefüllt, damit die Kurven nicht ineinander
+      laufen.
    --------------------------------------------------------------------- */
 const xs = Array.from(XS);
 const series = T.map((t, ti) => {
   const y = new Array(N).fill(null);
-  for (let i = 0; i < t.ele.length; i++) y[offset[ti] + i] = t.ele[i];
+  const ys = t[YKEY];
+  for (let i = 0; i < ys.length; i++) y[offset[ti] + i] = ys[i];
   return y;
 });
 
@@ -763,11 +884,12 @@ function gradientFor(ti, alpha) {
     const x0 = u.bbox.left, x1 = u.bbox.left + u.bbox.width;
     if (!(x1 > x0)) return rampColor(attrOf(t, 0), alpha);
     const grad = u.ctx.createLinearGradient(x0, 0, x1, 0);
-    const n = t.km.length, steps = Math.min(64, n);
+    const tx = t[XKEY];
+    const n = tx.length, steps = Math.min(64, n);
     let last = -1;
     for (let s = 0; s < steps; s++) {
       const i = Math.round(s * (n - 1) / (steps - 1 || 1));
-      let p = (u.valToPos(t.km[i], "x", true) - x0) / (x1 - x0);
+      let p = (u.valToPos(tx[i], "x", true) - x0) / (x1 - x0);
       p = Math.max(0, Math.min(1, p));
       if (p <= last) continue;
       last = p;
@@ -815,15 +937,17 @@ function showPoint(g) {
    --------------------------------------------------------------------- */
 const PMARKS = [];
 T.forEach(t => {
-  const n = t.km.length;
-  PMARKS.push({ x: t.km[0], y: t.ele[0], c: "#00a000", lab: "S" });
-  PMARKS.push({ x: t.km[n - 1], y: t.ele[n - 1], c: "#d00000", lab: "Z" });
+  const tx = t[XKEY], ty = t[YKEY];
+  const n = tx.length;
+  PMARKS.push({ x: tx[0], y: ty[0], c: "#00a000", lab: "S" });
+  PMARKS.push({ x: tx[n - 1], y: ty[n - 1], c: "#d00000", lab: "Z" });
   (t.splits || []).forEach(s =>
-    PMARKS.push({ x: t.km[s.i], y: t.ele[s.i], c: "#ff8c00", lab: String(s.n) }));
-  /* Info-Punkte an der Kilometer-Stelle ihres nächstgelegenen Trackpunkts
-     (blau, Beschriftung "i") - dieselben Punkte wie auf der Karte. */
+    PMARKS.push({ x: tx[s.i], y: ty[s.i], c: "#ff8c00", lab: String(s.n) }));
+  /* Info-Punkte an der (gemäß Achsenwahl) aktuellen X-/Y-Stelle ihres
+     nächstgelegenen Trackpunkts (blau, Beschriftung "i") - dieselben
+     Punkte wie auf der Karte. */
   (t.notes || []).forEach(nt =>
-    PMARKS.push({ x: nt.km, y: nt.ele, c: "#1E88E5", lab: "i" }));
+    PMARKS.push({ x: nt[XKEY], y: nt[YKEY], c: "#1E88E5", lab: "i" }));
 });
 function drawMarks(uu) {
   if (!PMARKS.length) return;
@@ -863,15 +987,17 @@ const profileEl = document.getElementById("profile");
 const plotWidth = () => Math.max(320, profileEl.clientWidth || 0);
 let syncing = false;   /* verhindert Rückkopplung Karte <-> Profil */
 
+const xAxisLabel = D.axis.xLabel + (D.axis.xUnit ? " (" + D.axis.xUnit + ")" : "");
+const yAxisLabel = D.axis.yLabel + (D.axis.yUnit ? " (" + D.axis.yUnit + ")" : "");
 const u = new uPlot({
   width: plotWidth(),
   height: Math.max(120, PROFH - 4),
   cursor: { y: false, drag: { x: true, y: false } },
   legend: { show: false },
   scales: { x: { time: false } },
-  axes: [{ label: "Distanz (km)", size: 40 }, { label: "Höhe (m)", size: 55 }],
+  axes: [{ label: xAxisLabel, size: 40 }, { label: yAxisLabel, size: 55 }],
   series: [
-    { label: "km" },
+    { label: D.axis.xLabel },
     ...T.map((t, ti) => ({
       label: t.title,
       stroke: gradientFor(ti, null),
@@ -916,9 +1042,9 @@ map.on("mousemove", e => {
   if (g < 0) return;
   showPoint(g);
   syncing = true;
-  const ele = T[owner[g]].ele[local[g]];
+  const yv = T[owner[g]][YKEY][local[g]];
   u.setCursor({ left: u.valToPos(XS[g], "x"),
-                top: u.valToPos(ele === null ? u.scales.y.min : ele, "y") });
+                top: u.valToPos(yv === null ? u.scales.y.min : yv, "y") });
   syncing = false;
 });
 map.on("mouseout", () => pinVisible(false));
@@ -1062,29 +1188,43 @@ def _render_component(html: str, height: int) -> None:
 
 def render_linked_map_page(settings_container=None) -> None:
     """
-    Baut die Seite "Karte (Sync)" auf: Filter in der Seitenleiste,
-    Kennzahlen links, synchronisierte Karte + Höhenprofil rechts.
+    Baut die Seite "Karte" auf: Filter in der Seitenleiste, Kennzahlen
+    links, synchronisierte Karte + Höhenprofil rechts.
 
-    'settings_container' ist - wie bei render_map_page() - der aufklappbare
-    Seitenleisten-Bereich aus app.py, in den die Anzeigeeinstellungen
-    gerendert werden.
+    'settings_container' ist der aufklappbare Seitenleisten-Bereich aus
+    app.py, in den die Anzeigeeinstellungen gerendert werden.
 
     Wichtig für das Bedienempfinden: Jeder Streamlit-Rerun (z.B. ein
-    geänderter Filter) baut die Komponente neu auf und setzt damit
-    Kartenausschnitt und Profil-Zoom zurück. Bleibt das erzeugte HTML
-    unverändert, rendert Streamlit den iframe dagegen nicht neu - deshalb
-    werden hier nur die tatsächlich benötigten Daten in das Dokument
-    geschrieben.
+    geänderter Filter oder eine geänderte Achsen-/Farbauswahl) baut die
+    Komponente neu auf und setzt damit Kartenausschnitt und Profil-Zoom
+    zurück. Bleibt das erzeugte HTML unverändert, rendert Streamlit den
+    iframe dagegen nicht neu - deshalb werden hier nur die tatsächlich
+    benötigten Daten in das Dokument geschrieben.
     """
     if settings_container is None:
         settings_container = st.sidebar.expander("⚙️ Einstellungen", expanded=False)
 
     with settings_container:
         st.selectbox(
-            "Einfärben mit",
+            "X-Achse",
+            options=list(_AXIS_X_OPTIONS.keys()),
+            key="lm_axis_x",
+            format_func=lambda x: _AXIS_X_OPTIONS[x],
+            help="Größe auf der waagerechten Achse des Höhenprofils.",
+        )
+        st.selectbox(
+            "Y-Achse",
+            options=list(_AXIS_Y_OPTIONS.keys()),
+            key="lm_axis_y",
+            format_func=lambda x: _AXIS_Y_OPTIONS[x],
+            help="Größe auf der senkrechten Achse des Höhenprofils.",
+        )
+        st.selectbox(
+            "Einfärbung",
             options=list(_COLOR_OPTIONS.keys()),
             key="lm_plot_column",
             format_func=lambda x: _COLOR_OPTIONS[x][0],
+            help="Färbt Track-Linie und Profilkurve nach dieser Kennzahl ein.",
         )
         st.selectbox(
             "Hintergrundkarte",
@@ -1100,29 +1240,22 @@ def render_linked_map_page(settings_container=None) -> None:
             key="kpi_col_width_pct",
             help="Breite der Kennzahlen-Spalte gegenüber der Karte rechts daneben.",
         )
-        # Höhe von Karte + Profil: keine eigene Einstellung mehr, wird wie
-        # auf der Seite "Karte" automatisch per JavaScript aus der
-        # Fensterhöhe ermittelt (siehe map._resolve_map_profile_height).
+        # Höhe von Karte + Profil: keine eigene Einstellung, wird
+        # automatisch per JavaScript aus der Fensterhöhe ermittelt (siehe
+        # map._resolve_map_profile_height).
 
     # Unterteilungspunkte des Planungsmodus (track_id -> Liste von
-    # Punkt-Indizes) - dieselbe Ablage wie auf der Seite "Karte"; hier nur
-    # defensiv angelegt, falls diese Seite zuerst aufgerufen wird.
+    # Punkt-Indizes) - defensiv angelegt, falls z.B. noch keine Auswahl
+    # getroffen wurde.
     st.session_state.setdefault("split_points", {})
 
-    # Dieselben Filter wie auf der Seite "Karte" (gemeinsame Widget-Keys,
-    # die Auswahl bleibt beim Seitenwechsel also erhalten).
     meta = render_track_filters()
     if meta.empty:
-        # Wie auf der Seite "Karte": nur diesen Seitenaufbau beenden (kein
-        # st.stop()), damit der "🚪 Beenden"-Knopf aus app.py weiterhin
-        # gerendert wird.
+        # Nur diesen Seitenaufbau beenden (kein st.stop()), damit der
+        # "🚪 Beenden"-Knopf aus app.py weiterhin gerendert wird.
         render_no_selection_hint()
         return
 
-    # Ebenso der Planungsmodus-Schalter: gemeinsamer Widget-Key
-    # 'planning_mode', der Modus bleibt beim Seitenwechsel also erhalten.
-    # Gesetzt werden die Punkte auf der Seite "Karte" (die Komponente hier
-    # meldet nichts an Streamlit zurück), angezeigt werden sie auf beiden.
     planning_active = render_planning_toggle(meta["track_id"].tolist())
 
     # Erst jetzt die (großen) GPX-Binärdaten der ausgewählten Tracks laden.
@@ -1155,9 +1288,10 @@ def render_linked_map_page(settings_container=None) -> None:
     with col_kpis:
         with _keyed_container("mp_kpis", border=True):
             if planning_active:
-                # Kennzahlen je Teil, Punkteliste und ZIP-Export - identisch
-                # zur Seite "Karte" (process_track ist gecacht, der Aufruf
-                # innerhalb von _build_payload kostet also nicht doppelt).
+                # Kennzahlen je Teil, Punkteliste und ZIP-Export (siehe
+                # map._render_planning_kpis; process_track ist gecacht, der
+                # Aufruf innerhalb von _build_payload kostet also nicht
+                # doppelt).
                 _render_planning_kpis(
                     single_gdf,
                     single_track_id,
@@ -1167,7 +1301,13 @@ def render_linked_map_page(settings_container=None) -> None:
             else:
                 _render_kpis(df)
 
-            # Info-Punkte: dieselbe Verwaltung wie auf der Seite "Karte".
+            # Bestzeiten nur bei genau einem Track (siehe
+            # map._render_best_efforts) - unabhängig vom Planungsmodus.
+            if single_gdf is not None:
+                st.divider()
+                _render_best_efforts(single_gdf)
+
+            # Info-Punkte-Verwaltung (siehe map._render_notes_panel).
             # 'allow_map_click' (der Checkbox-Umweg über st_folium) bleibt
             # hier aus - stattdessen per Rechtsklick direkt auf der Karte
             # rechts speichern (siehe _handle_note_bridge). Das Formular
@@ -1193,12 +1333,15 @@ def render_linked_map_page(settings_container=None) -> None:
                 st.caption(
                     "📐 Planungsmodus: Die Trennpunkte werden in Karte und "
                     "Höhenprofil angezeigt (orange, nummeriert; Start = S, "
-                    "Ende = Z). Gesetzt und gelöscht werden sie auf der Seite "
-                    "\"Karte\" oder über das \"✕\" in der Punkteliste links."
+                    "Ende = Z). Gelöscht werden sie über das \"✕\" in der "
+                    "Punkteliste links - neue Punkte lassen sich in der "
+                    "aktuellen Oberfläche nicht per Klick setzen."
                 )
             payload = _build_payload(
                 df,
                 st.session_state.lm_plot_column,
+                st.session_state.lm_axis_x,
+                st.session_state.lm_axis_y,
                 st.session_state.lm_basemap,
                 map_height,
                 profile_height,
@@ -1311,5 +1454,5 @@ def _handle_note_bridge(
 
 # Direkter Start zu Debug-Zwecken: `streamlit run map_linked.py`.
 if __name__ == "__main__":
-    st.set_page_config(page_title="Karte (Sync)", layout="wide")
+    st.set_page_config(page_title="Karte", layout="wide")
     render_linked_map_page()

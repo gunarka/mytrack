@@ -10,7 +10,7 @@ Benutzersicht (was die App kann, wie man sie bedient) steht im
 | | |
 |---|---|
 | Zweck | GPX-Tracks hochladen, verwalten, auf Karte/Höhenprofil ansehen, auswerten |
-| Stack | Python 3.10+, Streamlit ≥ 1.49, DuckDB, GeoPandas/gpxpy, Folium, Plotly; auf der Seite "Karte (Sync)" zusätzlich Leaflet + uPlot (per CDN im Browser) |
+| Stack | Python 3.10+, Streamlit ≥ 1.49, DuckDB, GeoPandas/gpxpy, Folium (nur Heatmap auf der Statistik-Seite); die Kartenseite "Karte" nutzt zusätzlich Leaflet + uPlot (per CDN im Browser, siehe map_linked.py) |
 | Ausführung | Lokal, Single-User, `streamlit run app.py` |
 | Daten | Lokale Datei `.data/tracks.duckdb` (nicht im Repo, siehe `.gitignore`) |
 | Sprache | Oberfläche, Kommentare, Docstrings und Commits auf **Deutsch** |
@@ -22,14 +22,16 @@ app.py         Einstiegspunkt: set_page_config, globales CSS, Sidebar, Navigatio
                "Beenden"-Knopf (Abschiedsseite + functions.shutdown_app());
                der Knopf wird NACH navigation.run() gerendert und ist auf
                jeder Seite und in jedem Zustand sichtbar
-├── map.py     Seite "Karte"      -> render_map_page(settings_container=None)
-│              zusätzlich: render_track_filters() - Sidebar-Filter und
-│              render_planning_toggle() - Schalter "📐 Planung", beide von
-│              beiden Kartenseiten genutzt
-├── map_linked.py  Seite "Karte (Sync)" -> render_linked_map_page(settings_container=None)
-│              Karte + Profil als EINE HTML/JS-Komponente (Leaflet + uPlot)
+├── map_linked.py  Seite "Karte" (Standardseite) -> render_linked_map_page(settings_container=None)
+│              Karte + Profil als EINE HTML/JS-Komponente (Leaflet + uPlot),
+│              wählbare X-/Y-Achse + Einfärbung des Höhenprofils
 ├── stats.py   Seite "Statistik"  -> render_stats_page()
 └── admin.py   Seite "Verwaltung" -> render_admin_page()
+map.py         KEINE eigene Seite mehr - Bibliothek gemeinsamer Bausteine der
+               Kartenseite (Filter, Kennzahlen, Info-Punkte, Planungsmodus,
+               Höhenermittlung), von map_linked.py importiert. Frühere
+               eigenständige Folium/Plotly-Kartenseite ("Karte"), siehe
+               Abschnitt "Entfernte Folium/Plotly-Kartenseite" unten.
 functions.py   Gesamte Fachlogik: DB, GPX, Geocoding, Kennzahlen, CRUD
 init.py        Separates Werkzeug: Tabellen neu anlegen (löscht alle Daten!)
 .streamlit/config.toml   Streamlit-Konfiguration (wirksam)
@@ -130,24 +132,26 @@ führendem Unterstrich.
 - Filter/Auswahl Karte: `sport_select`, `country_select`, `year_select`,
   `season_select`, Checkboxen `track_select_<id>` /
   `tour_select_<jahr>_<id>` sowie `_tour_open_<jahr>_<id>` (auf-/zugeklappt)
-- Anzeige: `plot_column`, `profile_y_column` (Y-Achse des Höhenprofils,
-  siehe `map.PROFILE_Y_OPTIONS`), `kpi_col_width_pct`, `window_height_js`
-  (Rückgabewert der JS-Fensterhöhen-Messung, siehe
-  `map._resolve_map_profile_height()` - keine eigene Auswahl/Einstellung
-  mehr für den Höhen-Modus)
-- Info-Punkte: `note_click_mode` (Kartenklick wählt Position),
-  `_note_position` (vorgemerkte Koordinaten), `_last_note_map_click`
+- Anzeige: `kpi_col_width_pct`, `window_height_js` (Rückgabewert der
+  JS-Fensterhöhen-Messung, siehe `map._resolve_map_profile_height()` -
+  keine eigene Auswahl/Einstellung mehr für den Höhen-Modus)
+- Info-Punkte: `_note_position` (vorgemerkte Koordinaten). `note_click_mode`
+  wird von `_render_notes_panel()` nur gesetzt, wenn `allow_map_click=True`
+  ist - der einzige verbleibende Aufrufer (`map_linked.py`) übergibt IMMER
+  `False`, der Schlüssel entsteht in der aktuellen Oberfläche also nicht
+  mehr (die Funktion selbst unterstützt ihn weiterhin, für einen
+  potenziellen künftigen Aufrufer mit Kartenklick-Rückkanal).
 - Karte/Profil: `selected_point`, `my_chart_key`
-- Karte (Sync): `lm_plot_column`, `lm_basemap` (Anzeigeeinstellung
-  `kpi_col_width_pct` sowie alle Filter-Keys UND `planning_mode`/
-  `split_points` werden mit der Seite "Karte" geteilt, damit Auswahl und
-  Planung beim Seitenwechsel stehen bleiben; `profile_y_column` wirkt NUR
-  auf der Seite "Karte" - die Sync-Seite zeigt im Profil immer die Höhe),
-  `_lm_note_bridge_gen` (Zähler für den `key` der
+- Kartenseite ("Karte", `map_linked.py`): `lm_plot_column` (Einfärbung),
+  `lm_axis_x`/`lm_axis_y` (Achsenwahl des Höhenprofils, siehe
+  `map_linked._AXIS_X_OPTIONS`/`_AXIS_Y_OPTIONS` - bleiben als normale
+  Widget-`key`s automatisch über Reruns/Trackwechsel hinweg erhalten),
+  `lm_basemap`, `_lm_note_bridge_gen` (Zähler für den `key` der
   `streamlit-javascript`-Rückkanal-Komponente, siehe
   `map_linked._handle_note_bridge`)
-- Planung: `planning_mode`, `split_points`, `_last_planning_click`,
-  `_last_planning_map_click`, `_last_track_ids`
+- Planung: `planning_mode`, `split_points` (Setzen per Klick ist in der
+  aktuellen Oberfläche nicht mehr möglich - nur Anzeigen, Löschen über
+  `_render_planning_kpis()` und Export)
 - Beenden: `_shutdown_requested` (Abschiedsseite statt `navigation.run()`)
 
 Die Track-Checkboxen werden bewusst persistent gehalten, damit die Auswahl
@@ -162,8 +166,7 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 - Öffentliche Funktionen ohne Unterstrich, modulinterne Helfer mit
   führendem `_`.
 - Type Hints an Funktionssignaturen.
-- Streamlit ≥ 1.49: `width="stretch"` statt `use_container_width`,
-  `height=` bei `st.plotly_chart`.
+- Streamlit ≥ 1.49: `width="stretch"` statt `use_container_width`.
 - Layout-CSS zentral im `st.markdown`-Block in `app.py`, nicht verteilt in
   den Seiten und nicht in `config.toml` (TOML ist kein CSS).
 - Keine Geheimnisse, keine Datenbank, keine `__pycache__`-Ordner
@@ -174,47 +177,60 @@ Filterwechsel und Rerenders übersteht (`_persistent_checkbox()` in
 | Vorhaben | Ort |
 |---|---|
 | Neue Kennzahl je Track | `summarize_track()` + Spalte in `init_database()`/`_ensure_schema_migrations()` + Anzeige in `_render_kpis()` (map.py) |
-| Neuer Filter auf der Karte | `render_map_page()` (Pills-Block) + ggf. `load_metadata()` |
+| Neuer Filter auf der Karte | `render_track_filters()` (Pills-Block) in `map.py` + ggf. `load_metadata()` |
 | Neue Auswertung | `stats.py` (`_render_*`), Daten über `load_metadata()` |
 | Neue Verwaltungsfunktion | Formular in `admin.py`, Schreiblogik in `functions.py` |
 | Neue Seite | Modul mit `render_*_page()` + Eintrag in `pages` in `app.py` |
 | Verhalten beim Beenden | `shutdown_app()`/`close_connection()` in `functions.py`, UI-Teil am Ende von `app.py` |
 | Verhalten ohne Track-Auswahl | `render_track_filters()` (leeres DataFrame) + `render_no_selection_hint()` in `map.py` |
-| Filter der Kartenseiten | `render_track_filters()` in `map.py` (wirkt auf beide Karten) |
+| Filter der Kartenseite | `render_track_filters()` in `map.py`, genutzt von `map_linked.py` |
 | Darstellung der Track-Auswahl | `_render_track_tree()` / `_render_tour_group()` in `map.py` |
 | Info-Punkte (Logik/Export) | `functions.py`, Abschnitt "Info-Punkte" |
-| Info-Punkte (Bedienung) | `_render_notes_panel()` in `map.py` (von beiden Karten genutzt) |
+| Info-Punkte (Bedienung) | `_render_notes_panel()` in `map.py`, genutzt von `map_linked.py` |
+| Bestzeiten | `_render_best_efforts()` in `map.py`, genutzt von `map_linked.py` |
 | Höhe von Karte + Profil | `_resolve_map_profile_height()` in `map.py` (automatisch per JS, keine Auswahl mehr) |
-| Profildarstellung (Y-Achse Höhenprofil) | `PROFILE_Y_OPTIONS`, `_profile_y_series()`/`_profile_y_range()`/`_profile_y_value_at()` in `map.py`; kumulierte Bewegungszeit je Punkt in `process_gpx_dataframe()` (`functions.py`, Spalte `time_moving_passed_s`) |
-| Planungs-Schalter | `render_planning_toggle()` in `map.py` (wirkt auf beide Karten) |
+| Achsenwahl (X/Y) des Höhenprofils | `_AXIS_X_OPTIONS`/`_AXIS_Y_OPTIONS`/`_AXIS_X_FIELDS`/`_AXIS_Y_FIELDS` in `map_linked.py`, Übertragung in `_build_payload()`, Auswertung im JS-Teil (`XKEY`/`YKEY`); kumulierte Zeit/Bewegungszeit/Punktzähler je Punkt ebenfalls dort berechnet (Zeit in Bewegung nutzt die Spalte `time_moving_passed_s` aus `functions.process_gpx_dataframe()`) |
+| Einfärbung Karte/Profil | `_COLOR_OPTIONS` in `map_linked.py`, Auswertung im JS-Teil (`COL`/`attrOf()`) - unabhängig von der Achsenwahl |
+| Planungs-Schalter | `render_planning_toggle()` in `map.py`; Trennpunkte setzen per Klick gibt es in der aktuellen Oberfläche nicht mehr (siehe "Entfernte Folium/Plotly-Kartenseite" unten) |
 | Interaktion Karte/Profil ohne Rerun | JS-Vorlage `_HTML_TEMPLATE` in `map_linked.py` |
 | Änderung am GPX-Parsing | `process_gpx_dataframe()` (pro Punkt) |
 
 ## Karte + Profil in einer Komponente (map_linked.py)
 
-Die Seite "Karte" besteht aus zwei getrennten Streamlit-Elementen
-(Folium-iframe, Plotly-Chart); beide können nur über einen Server-Rerun
-miteinander reden. `st_folium` meldet ausschließlich Klicks/Viewport,
-`st.plotly_chart` ausschließlich `on_select` – ein Rerun dauert
-100-500 ms, eine Hover-Kopplung bräuchte < 16 ms. Deshalb liegen auf der
-Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
+Eine Karte als Folium-iframe und ein separates Plotly-Chart können nur
+über einen Server-Rerun miteinander reden. `st_folium` meldet
+ausschließlich Klicks/Viewport, `st.plotly_chart` ausschließlich
+`on_select` – ein Rerun dauert 100-500 ms, eine Hover-Kopplung bräuchte
+< 16 ms. Genau das bot eine frühere, inzwischen entfernte eigenständige
+Folium/Plotly-Kartenseite nicht (siehe Abschnitt "Entfernte Folium/
+Plotly-Kartenseite" unten) - deshalb liegen auf der (jetzt einzigen)
+Seite "Karte" Karte und Profil in **derselben JS-Laufzeit**:
 
 - Aufbau: `_build_payload()` (DataFrames -> JSON) ->
   `_component_html()` (JSON in die HTML/JS-Vorlage) ->
   `st.components.v1.html()`.
-- Kopplung im Browser: uPlot-Hook `setCursor` -> MapLibre-Marker;
-  MapLibre-`mousemove` -> `u.setCursor()`. Der nächstgelegene Trackpunkt
+- Kopplung im Browser: uPlot-Hook `setCursor` -> Leaflet-Marker;
+  Leaflet-`mousemove` -> `u.setCursor()`. Der nächstgelegene Trackpunkt
   wird über einen Gitter-Index (~200-m-Zellen) gesucht, nicht linear.
+- Achsenwahl (`XKEY`/`YKEY`, aus `D.axis.x`/`D.axis.y`): `_build_payload()`
+  überträgt je Punkt IMMER alle vier X-Kandidaten (`km`/`tmin`/`tmovmin`/
+  `pt`) und alle drei Y-Kandidaten (`ele`/`spd`/`slope`) - das JS wählt nur
+  noch per `t[XKEY]`/`t[YKEY]` das passende Feld aus. Dadurch bleibt der
+  gesamte übrige Code (Gradient, Marker, Zoom-Sync, Karten-Hover ->
+  Profil-Cursor) unabhängig von der aktuellen Achsenwahl. Neuer
+  X-/Y-Kandidat: zusätzliches Feld je Punkt in `_build_payload()` (Python)
+  ergänzen UND in `_AXIS_X_OPTIONS`/`_AXIS_Y_OPTIONS`/`_AXIS_X_FIELDS`/
+  `_AXIS_Y_FIELDS` eintragen - am JS-Teil selbst ändert sich dafür nichts.
 - Einfärbung: Die Linie wird in 240 Abschnitte mit je einer Farbe zerlegt
   (Leaflet-Canvas), das Profil bekommt einen Canvas-Verlauf entlang der
-  x-Achse (uPlot). Da x die Distanz ist, stimmen Karten- und Profilfarbe
-  punktgenau überein.
+  x-Achse (uPlot). Karte und Profil verwenden dafür denselben Punktindex
+  (nicht den X-Achsen-Wert), Karten- und Profilfarbe stimmen deshalb
+  UNABHÄNGIG von der aktuellen Achsenwahl punktgenau überein.
 - **Warum nicht MapLibre GL?** Erster Anlauf, verworfen: MapLibre braucht
   WebGL *und* einen Web Worker (dort wird jede GeoJSON-Quelle geparst). Im
   Streamlit-iframe kamen Basiskarte und DOM-Marker durch, die
   GeoJSON-Linien aber nicht. Leaflet rendert im Hauptthread auf ein
-  Canvas, braucht weder WebGL noch Worker und ist über Folium in dieser
-  App erprobt.
+  Canvas und braucht weder WebGL noch Worker.
 - **Fehler sichtbar machen:** In einem iframe sieht niemand die
   Browser-Konsole. `window.onerror`, `unhandledrejection` und
   Leaflets `tileerror` schreiben deshalb in einen roten Balken oben in der
@@ -231,11 +247,12 @@ Seite "Karte (Sync)" Karte und Profil in **derselben JS-Laufzeit**:
   tatsächlich übertragenen (ausgedünnten) Punkt abgebildet.
 - Die Komponente selbst ist eine **Einbahnstraße**: `st.components.v1.html()`
   liefert nur einmal Daten hinein, kein eingebauter Rückkanal nach
-  Streamlit. Trennpunkte werden hier deshalb weiterhin nur **angezeigt**;
-  gesetzt/gelöscht werden sie auf der Seite "Karte" bzw. über die
-  Punkteliste in der Kennzahlen-Spalte. Schalter
-  (`map.render_planning_toggle()`), Kennzahlen je Teil und GPX-Export gibt
-  es auf beiden Seiten.
+  Streamlit. Trennpunkte werden hier deshalb nur **angezeigt und
+  gelöscht** (über die Punkteliste in der Kennzahlen-Spalte,
+  `map._render_planning_kpis()`) - neu SETZEN lässt sich in der aktuellen
+  Oberfläche nicht mehr (siehe "Entfernte Folium/Plotly-Kartenseite"
+  unten). Schalter (`map.render_planning_toggle()`), Kennzahlen je Teil
+  und GPX-Export bleiben unverändert.
 - **Rückkanal für "📍 Punkt speichern?" (neue Info-Punkte):** Rechtsklick
   auf die Karte öffnet ein schwebendes JS-Overlay (Titel + Beschreibung,
   siehe `.note-overlay`/`openNoteOverlay()` in der HTML-Vorlage). "Speichern"
@@ -280,37 +297,87 @@ künftig wieder gezielt CSS auf einzelne Bereiche wirken soll. Fällt auf ein
 schlüsselloses `st.container()` zurück, falls die Streamlit-Version `key`
 noch nicht kennt.
 
-## Profildarstellung (Y-Achse des Höhenprofils)
+## Achsenwahl und Einfärbung des Höhenprofils (map_linked.py)
 
-Auswahl in den Anzeigeeinstellungen (`profile_y_column`, Standard `"ele"`
-= Höhe), Optionen in `map.PROFILE_Y_OPTIONS`: Höhe, Geschwindigkeit,
-"Zeit (gesamt - nicht in Bewegung)", Gefälle, Nichts.
+Drei unabhängige Auswahlen in den Anzeigeeinstellungen, alle als normale
+`st.selectbox`-Widgets mit `key` (bleiben dadurch automatisch über
+Reruns/Trackwechsel hinweg erhalten):
 
-- `map._profile_y_series(gdf, y_column)` liefert die Y-Werte der
-  Profil-Trace für einen Track; `_profile_y_value_at()` denselben Wert für
-  einen einzelnen Punkt-Index (u.a. für Info-Punkte, siehe
-  `_note_position_on_track(gdf, note, y_column=...)`).
-- `map._profile_y_range(df, y_column)` liefert den festen Wertebereich
-  über ALLE ausgewählten Tracks (für Achsen-Skalierung + Flächenfüllung).
-  Für "Höhe"/"Geschwindigkeit"/"Gefälle" stammt er aus den bereits in der
-  Datenbank gepflegten Min/Max-Kennzahlen je Track; für "Zeit in Bewegung"
-  aus `[0, max(track_time_moving_s)]` (die kumulierte Kurve jedes Tracks
-  beginnt bei 0); "Nichts" nutzt einen kleinen Dummy-Bereich um die
-  konstante 0-Linie.
-- Die kumulierte "Zeit in Bewegung" je Punkt (Spalte
-  `time_moving_passed_s`, Sekunden) wird in
-  `functions.process_gpx_dataframe()` berechnet: Zeitdifferenzen zu
-  Punkten unterhalb `DEFAULT_MIN_SPEED_MOVING_KMH` fließen mit 0 statt
-  ihrer tatsächlichen Dauer ein, bevor kumuliert wird - Pendant zur
-  Track-weiten Kennzahl aus `compute_moving_time_s()`, hier aber als
-  fortlaufende Reihe je Punkt statt als einzelner Summenwert.
-- Die Hover-Texte (`_build_hover_texts()`) zeigen UNABHÄNGIG von dieser
-  Auswahl immer alle Kennzahlen - nur Kurve/Füllung/Achsenskalierung des
-  Profils wechseln.
-- Gilt nur auf der Seite "Karte" (Plotly). Die Seite "Karte (Sync)"
-  (Leaflet + uPlot) zeigt im Profil weiterhin fest die Höhe - eine eigene
-  Umsetzung dort wäre eine separate JS-seitige Erweiterung der
-  `_HTML_TEMPLATE`/`_build_payload()`-Logik in `map_linked.py`.
+| Auswahl | session_state-Key | Optionen (Reihenfolge = Vorbelegung) | Felder je Punkt |
+|---|---|---|---|
+| X-Achse | `lm_axis_x` | Entfernung, Zeit, Zeit in Bewegung, Track Punkt # | `km`/`tmin`/`tmovmin`/`pt` |
+| Y-Achse | `lm_axis_y` | Höhe, Geschwindigkeit, Gefälle | `ele`/`spd`/`slope` |
+| Einfärbung | `lm_plot_column` | Höhe, Geschwindigkeit, Gefälle, Nichts | (nutzt dieselben Felder wie die Y-Achse, siehe `attrOf()`) |
+
+`map_linked._AXIS_X_OPTIONS`/`_AXIS_Y_OPTIONS`/`_COLOR_OPTIONS` sind die
+jeweilige Beschriftung+Einheit; `_AXIS_X_FIELDS`/`_AXIS_Y_FIELDS` bilden
+den Auswahlwert auf den Feldnamen in der an die Komponente übertragenen
+Track-Struktur ab.
+
+`_build_payload()` überträgt je Punkt IMMER alle vier X- und alle drei
+Y-Kandidaten (keine Neuberechnung bei einer Änderung der Achsenwahl nötig
+außer dem üblichen Rerun) - das JS wählt nur per `D.axis.x`/`D.axis.y`
+(`XKEY`/`YKEY`) das passende Feld aus (siehe vorheriger Abschnitt). Die
+Einfärbung ist bewusst unabhängig von der Y-Achse: Sie liest ihren
+Vergleichswert selbst aus `t.ele`/`t.spd`/`t.slope` (Funktion `attrOf()`),
+nicht aus dem gerade als Y-Achse gewählten Feld.
+
+Alle vier X-Kandidaten laufen - wie zuvor nur `km` - über ALLE
+ausgewählten Tracks hinweg stetig weiter (`distance_offset`/
+`time_offset`/`time_moving_offset`/`point_offset` in `_build_payload()`),
+damit mehrere Tracks im gemeinsamen Profil hintereinander erscheinen
+statt sich zu überlagern. Die kumulierte "Zeit in Bewegung" je Punkt
+(Spalte `time_moving_passed_s`, Sekunden) wird in
+`functions.process_gpx_dataframe()` berechnet: Zeitdifferenzen zu Punkten
+unterhalb `DEFAULT_MIN_SPEED_MOVING_KMH` fließen mit 0 statt ihrer
+tatsächlichen Dauer ein, bevor kumuliert wird - Pendant zur Track-weiten
+Kennzahl aus `compute_moving_time_s()`, hier aber als fortlaufende Reihe
+je Punkt statt als einzelner Summenwert.
+
+Die Werte-Leiste über der Karte (`showPoint()` im JS-Teil) zeigt
+UNABHÄNGIG von der Achsenwahl immer alle Kennzahlen (Track, km, Höhe,
+Tempo, Steigung, Zeit) - nur Profilkurve, Flächenfüllung und
+Achsenbeschriftung wechseln mit `XKEY`/`YKEY`.
+
+## Entfernte Folium/Plotly-Kartenseite
+
+Bis zu dieser Änderung gab es zwei Kartenseiten: "Karte" (Folium +
+Plotly, in `map.py`, mit `render_map_page()`) und "Karte (Sync)" (Leaflet
++ uPlot in einer Komponente, in `map_linked.py`). Die erste wurde
+entfernt; die zweite wurde zu "Karte" umbenannt und ist jetzt die
+Standardseite. Für künftige Arbeit an dieser Stelle wichtig:
+
+- `map.py` ist seitdem KEINE eigene Seite mehr (kein `render_map_page()`,
+  kein `st.Page(...)`-Eintrag in `app.py`), sondern reine Bibliothek für
+  `map_linked.py` (siehe Modul-Docstring von `map.py`).
+- Mit der alten Seite sind auch entfernt: `_render_map_and_profile()`,
+  `_build_hover_texts()`, `_note_texts()`, `_NOTE_COLOR`,
+  `_toggle_split_point()` sowie die Folium/Plotly-spezifischen Importe
+  (`folium`, `folium.plugins.Fullscreen`, `branca.colormap`,
+  `plotly.graph_objects`, `streamlit_folium.st_folium` - `folium`/
+  `streamlit_folium` bleiben aber reale Abhängigkeiten, da `stats.py`
+  seine Heatmap weiterhin darüber baut). `plotly`/`branca` sind seitdem
+  aus `requirements.txt` entfernt, da sie sonst nirgends mehr importiert
+  werden.
+- **Funktionslücke:** Unterteilungspunkte im Planungsmodus ließen sich
+  bislang NUR auf der alten Seite per Klick (Karte oder Profil) SETZEN
+  (`_toggle_split_point()`, über `st_folium`- bzw. Plotly-`on_select`-
+  Rückgabewerte). Die neue alleinige Seite "Karte" hat dafür keinen
+  Rückkanal (`st.components.v1.html()` ist eine Einbahnstraße, siehe
+  oben) - Trennpunkte lassen sich seitdem nur noch ANZEIGEN, LÖSCHEN
+  (`map._render_planning_kpis()`, Knopf "✕") und EXPORTIEREN, nicht mehr
+  per Klick neu setzen. Eine Wiederherstellung dieser Funktion bräuchte
+  einen eigenen Rückkanal in `map_linked.py`, ähnlich dem für neue
+  Info-Punkte (`_handle_note_bridge()`) - z.B. indem der Planungsmodus
+  beim Rechtsklick-Overlay zwischen "Info-Punkt anlegen" und "Trennpunkt
+  setzen" umschaltet.
+- Die Funktion `_render_best_efforts()` ("🏅 Bestzeiten") blieb in
+  `map.py` erhalten und wird jetzt explizit von `render_linked_map_page()`
+  aufgerufen (vorher geschah das nur in `render_map_page()`).
+- `_note_position_on_track()` (in `map.py`) hatte zwischenzeitlich (für
+  eine seitdem wieder entfernte Y-Achsen-Auswahl der alten Seite) einen
+  `y_column`-Parameter; nach dem Entfernen der alten Seite liefert sie
+  wieder einfach `(index, distance_m, elevation_m)`.
 
 ## Fallstricke
 
@@ -354,18 +421,21 @@ Auswahl in den Anzeigeeinstellungen (`profile_y_column`, Standard `"ele"`
 - In `map_linked.py` kein f-String für die HTML-Vorlage verwenden – die
   Vorlage ist voller geschweifter Klammern (JS/CSS). Platzhalter werden
   per `.replace()` ersetzt.
-- `process_track()` liefert ein **gecachtes** DataFrame. `map.py` ändert
-  darin die Spalte `distance`; neue Module sollten die zurückgegebenen
-  Frames nicht verändern (`map_linked.py` rechnet die Gesamtdistanz
-  deshalb aus `dist_delta` neu).
+- `process_track()` liefert ein **gecachtes** DataFrame. Kein Modul sollte
+  Spalten darin verändern (in-place mutieren) - wer eine über mehrere
+  Tracks hinweg fortlaufende Größe braucht (wie `map_linked.py` es für
+  Entfernung/Zeit/Zeit in Bewegung/Punktzähler tut, siehe Abschnitt
+  "Achsenwahl und Einfärbung des Höhenprofils"), berechnet sie als neues
+  Array aus den vorhandenen Spalten (z.B. `dist_delta`), statt eine
+  vorhandene Spalte zu überschreiben.
 - `render_*_page()` darf den Seitenaufbau **nur per `return`** abbrechen,
   nie per `st.stop()`: `st.stop()` beendet den kompletten Skriptdurchlauf,
   damit auch den erst danach gerenderten "🚪 Beenden"-Knopf aus `app.py`
   (und ein späteres Abfangen ist nicht möglich – nach einer Stop-Anforderung
   bricht jedes weitere `st.`-Kommando erneut ab). `render_track_filters()`
-  liefert deshalb bei fehlender Auswahl ein **leeres DataFrame**; beide
-  Kartenseiten prüfen `meta.empty`, zeigen `render_no_selection_hint()` und
-  kehren zurück.
+  liefert deshalb bei fehlender Auswahl ein **leeres DataFrame**;
+  `render_linked_map_page()` prüft `meta.empty`, zeigt
+  `render_no_selection_hint()` und kehrt zurück.
 - Beenden: Die Abschiedsseite muss **vor** `navigation.run()` geprüft und
   mit `st.stop()` abgeschlossen werden – sonst läuft beim Herunterfahren
   noch eine Seite gegen die gerade geschlossene Verbindung. Der Prozess
@@ -377,19 +447,11 @@ Auswahl in den Anzeigeeinstellungen (`profile_y_column`, Standard `"ele"`
   im Track-Baum stecken bereits im Jahres-Expander und werden deshalb über
   einen eigenen `▸`/`▾`-Knopf mit Merker in `st.session_state`
   auf-/zugeklappt (`_render_tour_group()`).
-- Die Klick-Auswertung im Höhenprofil rechnet über `curve_number // 2`
-  von der Trace-Nummer auf den Track zurück. Je Track gibt es GENAU zwei
-  Traces (Profil, Start/Ende) – zusätzliche Traces (z.B. die der
-  Info-Punkte) müssen deshalb **nach** der Track-Schleife angehängt
-  werden, sonst zeigt jeder Profilklick auf den falschen Track.
 - `st_folium` liefert `last_clicked` bei jedem Rerun erneut zurück, bis
-  ein neuer Klick erfolgt. Jede Auswertung braucht daher ihren eigenen
-  "zuletzt verarbeiteter Klick"-Merker (`_last_planning_map_click`,
-  `_last_note_map_click`), sonst entsteht eine Rerun-Schleife.
-- Ein Kartenklick kann zwei Bedeutungen haben (Trennpunkt setzen vs.
-  Position für einen Info-Punkt). Die Rangfolge steht an einer Stelle in
-  `_render_map_and_profile()`: `note_click_mode` gewinnt – ein Info-Punkt
-  darf gerade NICHT auf den nächsten Trackpunkt eingefangen werden.
+  ein neuer Klick erfolgt - relevant für die Heatmap-Karte in `stats.py`
+  bzw. für jeden künftigen `st_folium`-Einsatz: Jede Auswertung eines
+  Kartenklicks braucht ihren eigenen "zuletzt verarbeiteter Klick"-Merker
+  in `st.session_state`, sonst entsteht eine Rerun-Schleife.
 - Eingabefelder, deren Vorbelegung sich zwischen Reruns ändert (die
   Koordinaten im Formular "Punkt hinzufügen"), bekommen **keinen** `key`:
   Mit `key` würde Streamlit den alten Wert aus dem Sitzungszustand
